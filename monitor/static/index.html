@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f2">
+<title>积存金看板</title>
+<style>
+/* ── 设计令牌：界面色（金色主题只用于导航/按钮）与数据色（图表系列）分开 ── */
+:root {
+  color-scheme: light;
+  --bg: #f6f5f2; --surface: #fffefc; --surface-2: #f1efea; --border: #e6e3dc; --grid: #ece9e3;
+  --text: #121212; --text-2: #54524d; --text-3: #85837d;
+  --brand: #9a6b12; --brand-soft: #f6ead2; --on-brand: #ffffff;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
+  --radius: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --bg: #101010; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c; --grid: #282826;
+    --text: #f0efec; --text-2: #c3c2b7; --text-3: #8f8e88;
+    --brand: #e0a94a; --brand-soft: #3a2f1a; --on-brand: #1a1408;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101010; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c; --grid: #282826;
+  --text: #f0efec; --text-2: #c3c2b7; --text-3: #8f8e88;
+  --brand: #e0a94a; --brand-soft: #3a2f1a; --on-brand: #1a1408;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+button { font: inherit; color: inherit; }
+a { color: var(--brand); }
+
+/* ── 布局 ── */
+.app-header {
+  position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px); -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.header-inner { max-width: 1120px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 10px; }
+.logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; white-space: nowrap; }
+.logo-mark { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #f3c768, #b7861f); box-shadow: inset 0 -2px 0 rgba(0,0,0,.15); }
+.header-meta { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.updated { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon-btn { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); cursor: pointer; display: grid; place-items: center; flex: none; }
+.icon-btn:focus-visible, .tab:focus-visible, .seg button:focus-visible, .chip-btn:focus-visible, summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.tabs-top { display: none; }
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; justify-content: space-around;
+  background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border); padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
+}
+.tab {
+  flex: 1; border: 0; background: none; cursor: pointer; padding: 4px 0; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--text-3); font-size: 11px;
+}
+.tab svg { width: 22px; height: 22px; }
+.tab[aria-selected="true"] { color: var(--brand); font-weight: 600; }
+main { max-width: 1120px; margin: 0 auto; padding: 16px 16px calc(84px + env(safe-area-inset-bottom)); }
+@media (min-width: 820px) {
+  .tabbar { display: none; }
+  .tabs-top { display: flex; gap: 4px; margin-left: 20px; }
+  .tabs-top .tab { flex: none; flex-direction: row; font-size: 14px; padding: 7px 14px; gap: 6px; white-space: nowrap; }
+  .tabs-top .tab svg { width: 18px; height: 18px; }
+  .tabs-top .tab[aria-selected="true"] { background: var(--brand-soft); }
+  main { padding-bottom: 32px; }
+}
+.panel[hidden] { display: none; }
+.stack { display: grid; gap: 14px; }
+.grid-2 { display: grid; gap: 14px; grid-template-columns: 1fr; }
+@media (min-width: 820px) { .grid-2 { grid-template-columns: 1fr 1fr; } .span-2 { grid-column: 1 / -1; } }
+
+/* ── 卡片与通用元素 ── */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); min-width: 0; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.card-title { font-size: 15px; font-weight: 650; margin: 0; }
+.sub { color: var(--text-3); font-size: 12.5px; }
+.muted { color: var(--text-3); }
+.secondary { color: var(--text-2); }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); white-space: nowrap; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+.tag.ai { border-color: color-mix(in srgb, var(--brand) 45%, var(--border)); color: var(--brand); }
+.swatch { display: inline-block; width: 12px; height: 3px; border-radius: 2px; flex: none; }
+.notice { border-radius: 10px; padding: 10px 12px; background: var(--surface-2); font-size: 13.5px; border-left: 3px solid var(--text-3); }
+.notice.warn { border-left-color: var(--warning); }
+.notice.good { border-left-color: var(--good); }
+.notice.info { border-left-color: var(--brand); }
+.empty { color: var(--text-3); font-size: 14px; padding: 22px 0; text-align: center; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 14px; }
+.kv .k { color: var(--text-3); white-space: nowrap; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: none; padding: 4px 12px; color: var(--text-2); font-size: 13px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--brand); color: var(--on-brand); }
+.link-btn { border: 0; background: none; color: var(--brand); cursor: pointer; padding: 0; font-size: 13.5px; }
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+.more > summary { color: var(--text-2); font-size: 13px; margin-top: 10px; }
+.more > summary::before { content: "▸ "; color: var(--text-3); }
+.more[open] > summary::before { content: "▾ "; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: right; padding: 8px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-3); font-weight: 500; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+td.wrap, th.wrap { white-space: normal; text-align: left; }
+.list { list-style: none; padding: 0; margin: 0; }
+.list > li { padding: 10px 0; border-bottom: 1px solid var(--grid); }
+.list > li:last-child { border-bottom: 0; }
+.row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.row .grow { flex: 1; min-width: 0; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 总览 ── */
+.hero { display: grid; gap: 14px; grid-template-columns: 1fr; }
+@media (min-width: 560px) { .hero { grid-template-columns: 1.1fr 1fr; align-items: end; } }
+.price-big { font-size: 38px; font-weight: 700; letter-spacing: -.5px; line-height: 1.1; }
+.delta { font-size: 14px; font-weight: 600; }
+.mini-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+.mini-stat { background: var(--surface-2); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+.mini-stat .l { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-stat .v { font-size: 16px; font-weight: 650; }
+.action-label { font-size: 22px; font-weight: 700; }
+.action-zone { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; margin-top: 12px; }
+.ai-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+
+/* ── 策略 ── */
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.chip-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); cursor: pointer; }
+.chip-btn[aria-pressed="false"] { opacity: .45; }
+.chip-btn[aria-pressed="false"] .swatch { background: var(--text-3) !important; }
+.filter-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); cursor: pointer; }
+.filter-btn[aria-pressed="true"] { background: var(--brand-soft); border-color: var(--brand); color: var(--text); font-weight: 600; }
+.filter-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.strategy { border-bottom: 1px solid var(--grid); }
+.strategy:last-child { border-bottom: 0; }
+.strategy > summary { padding: 12px 0; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: center; }
+.strategy .name { font-weight: 600; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.strategy .ret { font-size: 18px; font-weight: 700; text-align: right; }
+.strategy .meta { color: var(--text-3); font-size: 12.5px; }
+.strategy .value { color: var(--text-3); font-size: 12.5px; text-align: right; }
+.strategy .body { padding: 0 0 12px 20px; font-size: 13.5px; }
+.rank { width: 20px; color: var(--text-3); font-size: 12px; flex: none; }
+
+/* ── AI ── */
+.bias { font-weight: 700; }
+.bar { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; position: relative; }
+.bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--text-2); }
+.bar .mid { position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--text-3); }
+.hz { padding: 12px 0; border-bottom: 1px solid var(--grid); }
+.hz:last-child { border-bottom: 0; }
+.hz-row { display: grid; grid-template-columns: 64px 1fr 92px; gap: 10px; align-items: center; font-size: 13.5px; margin-top: 6px; }
+
+/* ── 图表 ── */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.tooltip {
+  position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.14);
+  min-width: 150px; display: none; z-index: 5;
+}
+.tooltip .trow { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.tooltip .trow > span { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.foot { text-align: center; color: var(--text-3); font-size: 12px; padding: 18px 0 4px; }
+</style>
+</head>
+<body>
+<header class="app-header">
+  <div class="header-inner">
+    <div class="logo"><span class="logo-mark" aria-hidden="true"></span>积存金看板</div>
+    <nav class="tabs-top" role="tablist" aria-label="页面" id="tabs-top"></nav>
+    <div class="header-meta">
+      <span class="chip" id="market-chip"><span class="dot" style="background:var(--text-3)"></span>加载中</span>
+      <span class="updated" id="updated"></span>
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="切换深浅色" title="切换深浅色"></button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="panel stack" id="panel-overview" role="tabpanel" aria-label="总览"></section>
+  <section class="panel stack" id="panel-strategies" role="tabpanel" aria-label="策略" hidden></section>
+  <section class="panel stack" id="panel-ai" role="tabpanel" aria-label="AI" hidden></section>
+  <section class="panel stack" id="panel-market" role="tabpanel" aria-label="行情" hidden></section>
+  <section class="panel stack" id="panel-records" role="tabpanel" aria-label="记录" hidden></section>
+  <div class="foot">模拟盘为虚拟交易，不构成投资建议 · 每 60 秒自动刷新</div>
+</main>
+
+<nav class="tabbar" role="tablist" aria-label="页面" id="tabbar"></nav>
+
+<script>
+"use strict";
+/* ── 常量与格式化 ───────────────────────────────────────────────────── */
+const SERIES_SLOT = { hold: 1, dca: 2, dca_smart: 3, position: 4, dca_smart_ai: 5, position_ai: 6 };
+const BIAS = { bullish: "偏多", bearish: "偏空", neutral: "中性" };
+const CONF = { low: "低", medium: "中", high: "高" };
+const ACTION = { buy_on_dip: "回落低吸", wait: "观望", reduce_only: "只减仓" };
+const ANALYST = { claude: "Claude", codex: "Codex" };
+const SOURCE_TEXT = { claude: "Claude", codex: "Codex", consensus: "两者共识" };
+const ICONS = {
+  overview: '<path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
+  strategies: '<path d="M4 19V9m6 10V5m6 14v-7m4 7H2"/>',
+  ai: '<path d="M12 3v3m0 12v3m9-9h-3M6 12H3m14.5-6.5-2 2m-7 7-2 2m11 0-2-2m-7-7-2-2"/><circle cx="12" cy="12" r="3.2"/>',
+  market: '<path d="M3 17l5-6 4 3 6-8 3 4"/><path d="M3 21h18"/>',
+  records: '<path d="M6 3h9l4 4v14H6z"/><path d="M9 11h7M9 15h7M9 7h3"/>',
+};
+const EVENT_CN = {
+  "Inflation Rate YoY": "CPI 年率", "Inflation Rate MoM": "CPI 月率", "Core Inflation Rate YoY": "核心 CPI 年率", "Core Inflation Rate MoM": "核心 CPI 月率",
+  "PPI MoM": "PPI 月率", "PPI YoY": "PPI 年率", "Core PCE Price Index MoM": "核心 PCE 月率", "Core PCE Price Index YoY": "核心 PCE 年率",
+  "Non Farm Payrolls": "非农就业人数", "Unemployment Rate": "失业率", "Fed Interest Rate Decision": "美联储利率决议", "Fed Press Conference": "美联储新闻发布会",
+  "FOMC Economic Projections": "FOMC 经济预测", "FOMC Minutes": "FOMC 会议纪要", "Retail Sales MoM": "零售销售月率", "Retail Sales YoY": "社会消费品零售年率",
+  "GDP Growth Rate YoY": "GDP 年率", "GDP Growth Rate QoQ Adv": "GDP 季率初值", "GDP Growth Rate QoQ Final": "GDP 季率终值", "Industrial Production YoY": "工业增加值年率",
+  "Building Permits Prel": "营建许可初值", "Housing Starts": "新屋开工", "Existing Home Sales": "成屋销售", "Durable Goods Orders MoM": "耐用品订单月率",
+  "ISM Manufacturing PMI": "ISM 制造业 PMI", "ISM Services PMI": "ISM 服务业 PMI", "JOLTs Job Openings": "JOLTs 职位空缺", "Michigan Consumer Sentiment Prel": "密歇根消费者信心初值",
+  "Personal Income MoM": "个人收入月率", "Personal Spending MoM": "个人支出月率",
+};
+const eventName = (t) => EVENT_CN[t] || (/^Fed Chair (.+) Speech$/.test(t) ? `美联储主席${t.replace(/^Fed Chair (.+) Speech$/, " $1 ")}讲话` : t);
+const COUNTRY_CN = { US: "美国", CN: "中国" };
+const TABS = [["overview", "总览"], ["strategies", "策略"], ["ai", "AI"], ["market", "行情"], ["records", "记录"]];
+
+const bjFmt = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+const bjTime = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false });
+const fmtTs = (s) => s ? bjFmt.format(new Date(s)).replace(/\//g, "-") : "—";
+const num = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: d, maximumFractionDigits: d });
+const signed = (v, d = 2) => (v === null || v === undefined) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + num(Math.abs(v), d);
+const pct = (v, d = 2) => (v === null || v === undefined) ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v * 100).toFixed(d) + "%";
+const rate = (v) => v === null || v === undefined ? "—" : Math.round(v * 100) + "%";
+const seriesColor = (key) => `var(--series-${SERIES_SLOT[key] || 1})`;
+const arrow = (v) => v > 0 ? "▲" : v < 0 ? "▼" : "■";
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") node.className = v;
+    else if (k === "style") node.setAttribute("style", v);
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    node.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(String(c)) : c);
+  }
+  return node;
+}
+const svgEl = (tag, attrs = {}) => { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); return node; };
+const icon = (name) => { const s = svgEl("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" }); s.innerHTML = ICONS[name]; return s; };
+const card = (title, sub, ...body) => el("div", { class: "card" }, (title || sub) ? el("div", { class: "card-head" }, title ? el("h2", { class: "card-title" }, title) : null, sub || null) : null, ...body);
+const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 隐私模式 */ } } };
+
+/* ── 主题 ───────────────────────────────────────────────────────────── */
+const THEME_ICON = { auto: "◐", light: "☀", dark: "☾" };
+function applyTheme(mode) {
+  if (mode === "auto") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = mode;
+  const btn = document.getElementById("theme-btn");
+  btn.textContent = THEME_ICON[mode];
+  btn.setAttribute("aria-label", `主题：${{ auto: "跟随系统", light: "浅色", dark: "深色" }[mode]}，点击切换`);
+  const dark = mode === "dark" || (mode === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#101010" : "#f6f5f2");
+}
+let themeMode = store.get("gold-theme") || "auto";
+applyTheme(themeMode);
+document.getElementById("theme-btn").addEventListener("click", () => {
+  themeMode = { auto: "light", light: "dark", dark: "auto" }[themeMode];
+  store.set("gold-theme", themeMode); applyTheme(themeMode); renderActiveCharts();
+});
+
+/* ── 标签页 ─────────────────────────────────────────────────────────── */
+let activeTab = (location.hash.slice(1) || store.get("gold-tab") || "overview");
+if (!TABS.some(([id]) => id === activeTab)) activeTab = "overview";
+function buildTabs() {
+  for (const host of [document.getElementById("tabbar"), document.getElementById("tabs-top")]) {
+    for (const [id, label] of TABS) {
+      host.appendChild(el("button", { class: "tab", role: "tab", type: "button", "data-tab": id, "aria-controls": `panel-${id}`,
+        onclick: () => showTab(id) }, icon(id), el("span", {}, label)));
+    }
+  }
+}
+function showTab(id, push = true) {
+  activeTab = id; store.set("gold-tab", id);
+  if (push) history.replaceState(null, "", "#" + id);
+  document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === id)));
+  TABS.forEach(([tid]) => { document.getElementById(`panel-${tid}`).hidden = tid !== id; });
+  renderActiveCharts();
+  window.scrollTo({ top: 0 });
+}
+window.addEventListener("hashchange", () => { const id = location.hash.slice(1); if (TABS.some(([t]) => t === id)) showTab(id, false); });
+
+/* ── 图表：折线（共享 Y 轴、十字线汇总提示）与迷你走势 ─────────────── */
+function lineChart(container, { series, yFormat, tipFormat, refLines = [], height = 240, emptyText, zeroLine = false }) {
+  clear(container);
+  tipFormat = tipFormat || yFormat;
+  const visible = series.filter((s) => s.points.length);
+  const pts = visible.flatMap((s) => s.points);
+  if (pts.length < 2) { container.appendChild(el("div", { class: "empty" }, emptyText || "数据积累中")); return; }
+  const width = Math.max(container.clientWidth, 260);
+  const m = { top: 10, right: 8, bottom: 24, left: 52 };
+  const xs = pts.map((p) => +new Date(p[0]));
+  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  if (x0 === x1) { x0 -= 3600e3; x1 += 3600e3; }
+  const yVals = pts.map((p) => p[1]).concat(refLines.map((r) => r.value)).concat(zeroLine ? [0] : []);
+  let y0 = Math.min(...yVals), y1 = Math.max(...yVals);
+  const pad = (y1 - y0) * 0.1 || Math.abs(y1) * 0.002 || 0.001;
+  y0 -= pad; y1 += pad;
+  const X = (t) => m.left + (t - x0) / (x1 - x0) * (width - m.left - m.right);
+  const Y = (v) => m.top + (1 - (v - y0) / (y1 - y0)) * (height - m.top - m.bottom);
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, height, role: "img" });
+  for (let i = 0; i <= 4; i++) {
+    const v = y0 + (y1 - y0) * i / 4, y = Y(v);
+    svg.appendChild(svgEl("line", { x1: m.left, x2: width - m.right, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1 }));
+    const t = svgEl("text", { x: m.left - 8, y: y + 4, "text-anchor": "end", "font-size": 11, fill: "var(--text-3)" });
+    t.textContent = yFormat(v); svg.appendChild(t);
+  }
+  for (let i = 0; i <= 3; i++) {
+    const t0 = x0 + (x1 - x0) * i / 3;
+    const t = svgEl("text", { x: X(t0), y: height - 5, "text-anchor": i === 0 ? "start" : i === 3 ? "end" : "middle", "font-size": 11, fill: "var(--text-3)" });
+    t.textContent = (x1 - x0) > 36 * 3600e3 ? fmtTs(t0).slice(0, 5) : bjTime.format(new Date(t0)); svg.appendChild(t);
+  }
+  if (zeroLine && y0 < 0 && y1 > 0) svg.appendChild(svgEl("line", { x1: m.left, x2: width - m.right, y1: Y(0), y2: Y(0), stroke: "var(--text-3)", "stroke-width": 1 }));
+  let last = null;
+  for (const r of refLines.filter((r) => r.value >= y0 && r.value <= y1).sort((a, b) => b.value - a.value)) {
+    svg.appendChild(svgEl("line", { x1: m.left, x2: width - m.right, y1: Y(r.value), y2: Y(r.value), stroke: "var(--text-3)", "stroke-width": 1, "stroke-dasharray": "4 4" }));
+    if (last && Y(r.value) - last.y < 14) { last.node.textContent += " · " + r.label; continue; }
+    const t = svgEl("text", { x: width - m.right - 2, y: Y(r.value) - 4, "text-anchor": "end", "font-size": 11, fill: "var(--text-2)" });
+    t.textContent = r.label; svg.appendChild(t); last = { y: Y(r.value), node: t };
+  }
+  for (const s of visible) {
+    const d = s.points.map((p, i) => `${i ? "L" : "M"}${X(+new Date(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    svg.appendChild(svgEl("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  }
+  const cross = svgEl("line", { y1: m.top, y2: height - m.bottom, stroke: "var(--text-3)", "stroke-width": 1, visibility: "hidden" });
+  svg.appendChild(cross);
+  const dots = visible.map((s) => { const c = svgEl("circle", { r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }); svg.appendChild(c); return c; });
+  const hit = svgEl("rect", { x: m.left, y: 0, width: width - m.left - m.right, height, fill: "transparent" });
+  svg.appendChild(hit);
+  container.appendChild(svg);
+  const tip = el("div", { class: "tooltip", role: "status" }); container.appendChild(tip);
+  const nearest = (arr, t) => {
+    let lo = 0, hi = arr.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; (+new Date(arr[mid][0]) < t) ? lo = mid : hi = mid; }
+    return Math.abs(+new Date(arr[lo][0]) - t) <= Math.abs(+new Date(arr[hi][0]) - t) ? arr[lo] : arr[hi];
+  };
+  const move = (evt) => {
+    const rect = svg.getBoundingClientRect();
+    const px = (evt.clientX - rect.left) * width / rect.width;
+    const t = x0 + (Math.min(Math.max(px, m.left), width - m.right) - m.left) / (width - m.left - m.right) * (x1 - x0);
+    let snapT = null; const rows = [];
+    visible.forEach((s, i) => {
+      const p = nearest(s.points, t); snapT = snapT ?? +new Date(p[0]);
+      dots[i].setAttribute("cx", X(+new Date(p[0]))); dots[i].setAttribute("cy", Y(p[1])); dots[i].setAttribute("visibility", "visible");
+      rows.push({ name: s.name, color: s.color, v: p[1] });
+    });
+    cross.setAttribute("x1", X(snapT)); cross.setAttribute("x2", X(snapT)); cross.setAttribute("visibility", "visible");
+    clear(tip);
+    tip.appendChild(el("div", { class: "muted" }, fmtTs(snapT)));
+    rows.sort((a, b) => b.v - a.v).forEach((r) => tip.appendChild(el("div", { class: "trow" },
+      el("span", {}, el("span", { class: "swatch", style: `background:${r.color}` }), r.name), el("strong", {}, tipFormat(r.v)))));
+    tip.style.display = "block";
+    const left = X(snapT) / width * rect.width;
+    tip.style.left = (left + 12 + tip.offsetWidth > rect.width ? left - tip.offsetWidth - 12 : left + 12) + "px";
+    tip.style.top = "4px";
+  };
+  const leave = () => { tip.style.display = "none"; cross.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); };
+  hit.addEventListener("pointermove", move); hit.addEventListener("pointerdown", move); hit.addEventListener("pointerleave", leave);
+}
+
+function sparkline(container, points, height = 56) {
+  clear(container);
+  if (!points || points.length < 2) return;
+  const width = Math.max(container.clientWidth, 160);
+  const vs = points.map((p) => p[1]); const lo = Math.min(...vs), hi = Math.max(...vs) || 1;
+  const t0 = +new Date(points[0][0]), t1 = +new Date(points[points.length - 1][0]) || t0 + 1;
+  const X = (t) => (t - t0) / ((t1 - t0) || 1) * (width - 4) + 2;
+  const Y = (v) => 4 + (1 - (v - lo) / ((hi - lo) || 1)) * (height - 8);
+  const d = points.map((p, i) => `${i ? "L" : "M"}${X(+new Date(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, height, role: "img", "aria-label": "近 24 小时走势" });
+  svg.appendChild(svgEl("path", { d: `${d}L${X(t1)},${height}L${X(t0)},${height}Z`, fill: "var(--series-1)", opacity: .08 }));
+  svg.appendChild(svgEl("path", { d, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round" }));
+  const lp = points[points.length - 1];
+  svg.appendChild(svgEl("circle", { cx: X(+new Date(lp[0])), cy: Y(lp[1]), r: 3.5, fill: "var(--series-1)", stroke: "var(--surface)", "stroke-width": 2 }));
+  container.appendChild(svg);
+}
+
+/* ── 数据派生 ───────────────────────────────────────────────────────── */
+let DATA = null;
+const hiddenSeries = new Set();
+let priceRange = "1d";
+let fillFilter = "all";
+const plan = (d) => (d.snapshot || {}).plan;
+const startedBoard = (d) => d.leaderboard.filter((b) => b.started);
+function hardEvents(d) {
+  return ((d.macro || {}).hard_events_24h || []).map((e) => `${e.time_bj} ${eventName(e.title)}`);
+}
+function aiAgreement(d) {
+  const a = (d.ai && d.ai.analysts) || [];
+  if (a.length < 2) return null;
+  return { short: a[0].bias_short === a[1].bias_short, long: a[0].bias_long === a[1].bias_long };
+}
+
+/* ── 总览 ───────────────────────────────────────────────────────────── */
+function renderOverview(d) {
+  const panel = clear(document.getElementById("panel-overview"));
+  const s = d.snapshot || {}, p = plan(d), est = s.bank_est || {};
+  const ch = s.change_pct;
+  const spark = el("div", { class: "chart", id: "spark" });
+  panel.appendChild(el("div", { class: "card" },
+    el("div", { class: "hero" },
+      el("div", {},
+        el("div", { class: "sub" }, "XAUUSD 现货 · 美元/盎司"),
+        el("div", { class: "price-big" }, num(s.xauusd)),
+        el("div", { class: "delta secondary" }, ch === null || ch === undefined ? "" : `${arrow(ch)} ${signed(ch)}% 今日`,
+          s.day_low ? el("span", { class: "muted", style: "font-weight:400" }, `  ·  ${num(s.day_low, 0)} – ${num(s.day_high, 0)}`) : null)),
+      spark),
+    el("div", { class: "mini-stats" },
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "浙商 元/克"), el("div", { class: "v" }, num(est.zheshang))),
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "民生 元/克"), el("div", { class: "v" }, num(est.minsheng))),
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "USD/CNY"), el("div", { class: "v" }, num((s.fx || {}).rate, 4)))),
+    s.signals ? el("div", { class: "chips", style: "margin-top:12px" }, Object.entries(s.signals).map(([k, v]) => el("span", { class: "chip" }, `${k} ${v}`))) : null));
+
+  const adv = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "今日建议 · 短线"),
+    el("span", { class: "sub" }, s.plan_source === "ai" ? "含 AI 消息面" : "消息面按震荡")));
+  if (!p || !p.ok) {
+    adv.appendChild(el("div", { class: "empty" }, s.market_open === false ? "休市中" : "暂无计划"));
+  } else {
+    adv.appendChild(el("div", { class: "row" }, el("div", { class: "action-label" }, ACTION[p.action] || p.action), el("span", { class: "chip" }, p.gate_text)));
+    adv.appendChild(el("p", { class: "secondary", style: "margin:6px 0 0;font-size:14px" }, p.summary));
+    const b = p.buy;
+    if (b && b.t1 && b.zone_cny && p.action !== "buy_on_dip") {
+      adv.appendChild(el("div", { class: "sub", style: "margin-top:8px" },
+        `参考：${b.level} 低吸区 ${num(b.zone_cny[0], 1)}–${num(b.zone_cny[1], 1)} 元/克 · 止损 ${num(b.stop_cny, 1)} · T1 ${num(b.t1_cny, 1)} · R:R ${num(b.rr1)}（不达标，不建议入场）`));
+    } else if (b && b.t1 && b.zone_cny) {
+      adv.appendChild(el("div", { class: "action-zone" },
+        el("div", { class: "mini-stat" }, el("div", { class: "l" }, `低吸区（${b.level}）`), el("div", { class: "v" }, `${num(b.zone_cny[0], 1)}–${num(b.zone_cny[1], 1)}`)),
+        el("div", { class: "mini-stat" }, el("div", { class: "l" }, "止损"), el("div", { class: "v" }, num(b.stop_cny, 1))),
+        el("div", { class: "mini-stat" }, el("div", { class: "l" }, `T1 · R:R ${num(b.rr1)}`), el("div", { class: "v" }, num(b.t1_cny, 1)))));
+      adv.appendChild(el("div", { class: "sub", style: "margin-top:6px" }, `单位 元/克（${d.bank_name}）· 保本卖价 ${num(b.breakeven_cny)}（含 ${(d.sell_fee_rate * 100).toFixed(1)}% 卖出手续费）`));
+    }
+  }
+  const analysts = (d.ai && d.ai.analysts) || [];
+  if (analysts.length) {
+    const ag = aiAgreement(d);
+    adv.appendChild(el("div", { class: "ai-line", style: "margin-top:14px;padding-top:12px;border-top:1px solid var(--grid)" },
+      el("span", { class: "muted" }, "AI"),
+      analysts.map((v) => el("span", { class: "chip" }, `${v.name} 短期${BIAS[v.bias_short]} · 中长期${BIAS[v.bias_long]}`)),
+      ag ? el("span", { class: "sub" }, ag.short && ag.long ? "两者一致" : `${[ag.short ? "" : "短期", ag.long ? "" : "中长期"].filter(Boolean).join("、")}分歧`) : null));
+  }
+  const hard = hardEvents(d);
+  if (hard.length) adv.appendChild(el("div", { class: "notice warn", style: "margin-top:12px" }, "⚠️ 24 小时内重大事件：" + hard.join("；")));
+  panel.appendChild(adv);
+
+  const board = startedBoard(d).slice().sort((a, b) => b.return - a.return);
+  const top = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "模拟盘"),
+    el("button", { class: "link-btn", type: "button", onclick: () => showTab("strategies") }, `全部 ${d.leaderboard.length + d.short.length} 个策略 →`)));
+  if (!board.length) top.appendChild(el("div", { class: "empty" }, "账户尚未开始"));
+  top.appendChild(el("ul", { class: "list" }, board.slice(0, 4).map((b, i) => el("li", {}, el("div", { class: "row" },
+    el("span", { class: "rank" }, String(i + 1)), el("span", { class: "swatch", style: `background:${seriesColor(b.key)}` }),
+    el("span", { class: "grow ellipsis" }, b.name), el("strong", {}, pct(b.return)))))));
+  const acts = [...d.fills.map((f) => ({ ts: f.ts, text: `${d.strategy_names[f.strategy] || f.strategy} ${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`, key: f.strategy })),
+                ...d.alerts.filter((a) => !a.title.includes("监控已启动")).map((a) => ({ ts: a.ts, text: a.title }))].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 6);
+  const recent = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "最近动态"),
+    el("button", { class: "link-btn", type: "button", onclick: () => showTab("records") }, "全部记录 →")),
+    acts.length ? el("ul", { class: "list" }, acts.map((a) => el("li", {}, el("div", { class: "row" },
+      a.key ? el("span", { class: "swatch", style: `background:${seriesColor(a.key)}` }) : null,
+      el("span", { class: "grow ellipsis" }, a.text), el("span", { class: "sub" }, fmtTs(a.ts)))))) : el("div", { class: "empty" }, "暂无"));
+  panel.appendChild(el("div", { class: "grid-2" }, top, recent));
+}
+
+/* ── 策略 ───────────────────────────────────────────────────────────── */
+function renderStrategies(d) {
+  const panel = clear(document.getElementById("panel-strategies"));
+  const series = d.equity.series.map((s) => ({ ...s, color: seriesColor(s.key) }));
+  const legend = el("div", { class: "legend" }, series.map((s) => el("button", { class: "chip-btn", type: "button", "aria-pressed": String(!hiddenSeries.has(s.key)),
+    onclick: (e) => { hiddenSeries.has(s.key) ? hiddenSeries.delete(s.key) : hiddenSeries.add(s.key); e.currentTarget.setAttribute("aria-pressed", String(!hiddenSeries.has(s.key))); drawEquity(); } },
+    el("span", { class: "swatch", style: `background:${s.color}` }), s.name)));
+  panel.appendChild(card("收益率走势", el("span", { class: "sub" }, "按「现在全部卖出、扣手续费」计 · 点图例隐藏/显示"), legend, el("div", { class: "chart", id: "equity-chart" })));
+
+  const box = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "日线策略账户"),
+    el("span", { class: "sub" }, startedBoard(d).length ? `每户本金 ${num(startedBoard(d)[0].budget, 0)} 元 · 点开看规则与成交` : "")));
+  const sorted = d.leaderboard.slice().sort((a, b) => (b.started - a.started) || ((b.return || 0) - (a.return || 0)));
+  sorted.forEach((b) => {
+    const fills = d.fills.filter((f) => f.strategy === b.key);
+    const meta = b.started ? `回撤 ${(b.max_drawdown * 100).toFixed(1)}% · 持仓 ${num(b.grams, 1)} 克${b.avg_cost ? ` · 成本 ${num(b.avg_cost, 1)}` : ""} · ${b.fills} 笔` : (b.requires_ai ? "等待 AI 启用" : "等待首个交易日");
+    box.appendChild(el("details", { class: "strategy" },
+      el("summary", {},
+        el("div", { class: "name" }, el("span", { class: "swatch", style: `background:${seriesColor(b.key)}` }), el("span", { class: "ellipsis" }, b.name),
+          el("span", { class: "tag" }, b.horizon), b.requires_ai ? el("span", { class: "tag ai" }, "AI") : null),
+        el("div", { class: "ret" }, b.started ? pct(b.return) : "—"),
+        el("div", { class: "meta" }, meta),
+        el("div", { class: "value" }, b.started ? `${num(b.value, 0)} 元` : "")),
+      el("div", { class: "body" },
+        el("p", { class: "secondary", style: "margin:0 0 8px" }, b.description),
+        b.started ? el("div", { class: "sub", style: "margin-bottom:6px" }, `起始 ${fmtTs(b.started_at)} · 现金 ${num(b.cash, 0)} 元 · 手续费 ${num(b.fees)} 元`) : null,
+        fills.length ? el("ul", { class: "list" }, fills.map((f) => el("li", {}, el("div", { class: "row" },
+          el("span", { class: "grow" }, `${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`), el("span", { class: "sub" }, fmtTs(f.ts))),
+          el("div", { class: "sub" }, f.reason)))) : el("div", { class: "sub" }, "暂无成交"))));
+  });
+  panel.appendChild(box);
+
+  const shortCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "短线日内"),
+    el("span", { class: "sub" }, "每笔 10 克 · T1 平一半后止损移到保本卖价")));
+  const grid = el("div", { class: "grid-2" });
+  d.short.forEach((sp) => {
+    const waiting = sp.key === "short_ai" && !((d.ai || {}).analysts || []).length && !sp.recent.length;
+    const part = el("div", { style: "min-width:0" }, el("div", { class: "row", style: "margin-bottom:8px" }, el("strong", {}, sp.label),
+      sp.key === "short_ai" ? el("span", { class: "tag ai" }, "AI") : el("span", { class: "tag" }, "原版")));
+    if (waiting) { part.appendChild(el("div", { class: "notice" }, "收到第一次 AI 判断后开始交易")); grid.appendChild(part); return; }
+    part.appendChild(el("div", { class: "mini-stats", style: "margin-top:0" },
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "已平仓"), el("div", { class: "v" }, `${sp.trades} 笔`)),
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "胜率"), el("div", { class: "v" }, rate(sp.win_rate))),
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "累计 元"), el("div", { class: "v" }, signed(sp.total_pnl)))));
+    if (sp.open) {
+      const o = sp.open;
+      part.appendChild(el("div", { class: "notice info", style: "margin-top:10px" },
+        el("strong", {}, `持仓 ${num(o.open_grams, 1)} 克 @ ${num(o.entry_cny)}`),
+        el("div", { class: "sub" }, `止损 ${num(o.stop_cny)}${o.t1_hit ? "（已保本）" : ""} · T1 ${num(o.t1_cny)} · T2 ${num(o.t2_cny)} · 浮动 ${signed(o.unrealized)} 元`)));
+    } else if (!sp.recent.length) {
+      part.appendChild(el("div", { class: "sub", style: "margin-top:8px" }, `自 ${fmtTs(sp.running_since)} 运行，尚未触发交易（需进入低吸区、扣手续费后 R:R ≥ 1.5 且门控允许）`));
+    }
+    if (sp.recent.length) {
+      part.appendChild(el("ul", { class: "list", style: "margin-top:6px" }, sp.recent.slice(0, 6).map((r) => el("li", {}, el("div", { class: "row" },
+        el("span", { class: "grow" }, `${fmtTs(r.opened_at)} 入 ${num(r.entry_cny)}`),
+        el("strong", {}, r.status === "open" && !r.realized_cny ? "持仓中" : signed(r.realized_cny))),
+        el("div", { class: "sub" }, `止损 ${num(r.stop_cny)} · T1 ${num(r.t1_cny)} · T2 ${num(r.t2_cny)}${r.close_reason ? " · " + r.close_reason : ""}`)))));
+    }
+    grid.appendChild(part);
+  });
+  shortCard.appendChild(grid);
+  panel.appendChild(shortCard);
+}
+function drawEquity() {
+  const c = document.getElementById("equity-chart");
+  if (!c || !DATA) return;
+  const series = DATA.equity.series.filter((s) => !hiddenSeries.has(s.key)).map((s) => ({ ...s, color: seriesColor(s.key) }));
+  lineChart(c, { series, yFormat: (v) => pct(v, 1), tipFormat: (v) => pct(v, 2), zeroLine: true, emptyText: "账户刚开始运行，曲线积累几个小时后出现" });
+}
+
+/* ── AI ─────────────────────────────────────────────────────────────── */
+function viewBlock(v) {
+  const box = el("div", { class: "card" });
+  box.appendChild(el("div", { class: "card-head" }, el("h2", { class: "card-title" }, v.name), el("span", { class: "sub" }, `${fmtTs(v.ts)} · ${v.model || ""}`)));
+  box.appendChild(el("div", { class: "mini-stats", style: "margin-top:0" },
+    el("div", { class: "mini-stat" }, el("div", { class: "l" }, "短期 1-3 日"), el("div", { class: "v bias" }, BIAS[v.bias_short])),
+    el("div", { class: "mini-stat" }, el("div", { class: "l" }, "中长期 1-3 月"), el("div", { class: "v bias" }, BIAS[v.bias_long])),
+    el("div", { class: "mini-stat" }, el("div", { class: "l" }, "置信"), el("div", { class: "v" }, CONF[v.confidence] || v.confidence))));
+  box.appendChild(el("p", { style: "margin:12px 0 0;font-size:14px" }, v.summary));
+  if (v.hard_risk_event) box.appendChild(el("div", { class: "notice warn", style: "margin-top:10px" }, "⚠️ " + v.hard_risk_note));
+  if (v.drivers && v.drivers.length) box.appendChild(el("details", { class: "more" }, el("summary", {}, `驱动因素 ${v.drivers.length}`),
+    el("ul", { class: "list" }, v.drivers.map((x) => el("li", {}, el("strong", {}, `${x.direction} · ${x.horizon}  `), x.factor, el("div", { class: "sub" }, x.evidence))))));
+  if (v.upcoming_events && v.upcoming_events.length) box.appendChild(el("details", { class: "more" }, el("summary", {}, `日程 ${v.upcoming_events.length}`),
+    el("ul", { class: "list" }, v.upcoming_events.map((e) => el("li", {}, el("strong", {}, e.time_bj + "  "), e.name, el("div", { class: "sub" }, e.impact))))));
+  if (v.sources && v.sources.length) box.appendChild(el("details", { class: "more" }, el("summary", {}, `来源 ${v.sources.length}`),
+    el("ul", { class: "list" }, v.sources.map((s) => el("li", { class: "ellipsis" },
+      el("a", { href: /^https?:\/\//i.test(s.url) ? s.url : "#", target: "_blank", rel: "noopener noreferrer nofollow" }, s.title || s.url))))));
+  return box;
+}
+function renderAI(d) {
+  const panel = clear(document.getElementById("panel-ai"));
+  const ai = d.ai || {};
+  if (!ai.enabled || !(ai.analysts || []).length) {
+    panel.appendChild(card("AI 消息面", null, el("div", { class: "empty" }, ai.enabled ? "等待首次分析（工作日 08:40 / 20:45，及数据公布后）" : "未启用：需要 ANTHROPIC_API_KEY，或本机已登录的 Claude Code / Codex")));
+  } else {
+    const ag = aiAgreement(d);
+    panel.appendChild(el("div", { class: `notice ${ag ? (ag.short && ag.long ? "good" : "warn") : "info"}` },
+      ag ? `两个 AI：短期${ag.short ? "一致" : "分歧"}，中长期${ag.long ? "一致" : "分歧"}` : "AI 消息面",
+      el("span", { class: "muted" }, ` · 策略使用 ${SOURCE_TEXT[ai.strategy_source] || ai.strategy_source} 的判断 · 工作日 08:40 / 20:45 定时，美国重要数据公布后、30 分钟异动 ±0.6% 时加跑`)));
+    panel.appendChild(el("div", { class: "grid-2" }, ai.analysts.map(viewBlock)));
+  }
+  panel.appendChild(scorecardCard(d));
+  if ((ai.history || []).length) {
+    panel.appendChild(card("分析记录", null, el("ul", { class: "list" }, ai.history.map((h) => el("li", {}, el("div", { class: "row" },
+      el("span", { class: "grow" }, `${h.analyst} · ${h.trigger || ""}`), el("span", { class: "sub" }, fmtTs(h.ts))),
+      el("div", { class: "sub" }, h.error ? "失败：" + h.error : `短期${BIAS[h.bias_short]} · 中长期${BIAS[h.bias_long]} · 置信${CONF[h.confidence]}`))))));
+  }
+}
+function scorecardCard(d) {
+  const sc = d.scorecard;
+  const box = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "AI 判断成绩单"),
+    el("span", { class: "sub" }, sc && sc.views ? `${sc.runs} 轮 · ${sc.views} 次判断` : "")));
+  if (!sc || !sc.enabled || !sc.views || !sc.analysts.length) { box.appendChild(el("div", { class: "empty" }, "暂无 AI 判断记录")); return box; }
+  const anyDone = sc.analysts.some((a) => a.horizons.some((h) => h.done));
+  if (!anyDone) {
+    box.appendChild(el("div", { class: "notice info" }, `已记录 ${sc.views} 次判断，暂无到期结果。`,
+      el("div", { class: "sub", style: "margin-top:4px" }, "1 日周期在判断后的第一个纽约收盘（北京时间次日早上 5 点左右）到期；3 / 20 / 60 日依次更晚。两个 AI 同一轮的判断到期后开始统计一致 / 分歧。")));
+    box.appendChild(el("div", { class: "sub", style: "margin-top:10px" }, sc.analysts.map((a) => `${a.name}：待到期 ${a.horizons[0].pending} 次`).join(" · ")));
+    return box;
+  }
+  sc.analysts[0].horizons.forEach((h0, idx) => {
+    const sec = el("div", { class: "hz" }, el("div", { class: "row" }, el("strong", {}, h0.label),
+      el("span", { class: "sub" }, `${h0.field === "bias_short" ? "短期方向" : "中长期方向"} · 阈值 ±${(h0.threshold * 100).toFixed(1)}%`)));
+    sc.analysts.forEach((a) => {
+      const h = a.horizons[idx];
+      const status = h.done ? `${h.done} 次${h.baseline_n ? ` · 基准 ${rate(h.baseline_hit_rate)}` : ""}` : [h.pending ? `待到期 ${h.pending}` : "", h.no_data ? `缺数据 ${h.no_data}` : ""].filter(Boolean).join(" · ") || "无数据";
+      sec.appendChild(el("div", { class: "hz-row" }, el("span", {}, a.name),
+        el("div", { class: "bar", title: "命中率" }, h.done ? el("i", { style: `width:${Math.round(h.hit_rate * 100)}%` }) : null, el("span", { class: "mid" })),
+        el("span", { style: "text-align:right" }, el("strong", {}, h.done ? rate(h.hit_rate) : "—"), el("div", { class: "sub" }, status))));
+    });
+    const g = (sc.agreement || [])[idx];
+    if (g && sc.analysts.length >= 2) {
+      const wins = Object.entries(g.disagree_wins || {}).map(([n, c]) => `${ANALYST[n] || n} 对 ${c}`).join("、");
+      sec.appendChild(el("div", { class: "sub", style: "margin-top:6px" }, g.pairs
+        ? `两者一致 ${g.agree_n} 轮（命中 ${rate(g.agree_hit_rate)}）· 分歧 ${g.disagree_n} 轮${wins ? `（${wins}）` : ""}` : "同一轮两者都到期后统计一致 / 分歧"));
+    }
+    box.appendChild(sec);
+  });
+  box.appendChild(el("details", { class: "more" }, el("summary", {}, "计分规则"),
+    el("p", { class: "sub", style: "margin:8px 0 0" }, "命中：看多→涨幅超过阈值；看空→跌幅超过阈值；中性→涨跌在阈值内。短期阈值取卖出手续费 0.4%。条形中线为 50%。基准为「判断前 N 日涨跌」的机械动量方向，AI 跑不赢它说明方向判断没有价值。若「两者一致」时命中率明显更高，可将 GOLD_AI_STRATEGY_SOURCE 设为 consensus。样本少时结论不可靠。")));
+  const mark = (o) => !o ? "—" : o.status === "done" ? `${o.hit ? "✓" : "✗"}${pct(o.ret, 1)}` : o.status === "pending" ? "待" : "缺";
+  box.appendChild(el("details", { class: "more" }, el("summary", {}, `最近判断 ${sc.recent.length} 轮`),
+    el("ul", { class: "list" }, sc.recent.map((r) => el("li", {}, el("div", { class: "sub" }, fmtTs(r.ts)),
+      Object.entries(r.calls).map(([n, c]) => el("div", { class: "row", style: "font-size:13px;margin-top:4px" },
+        el("span", { style: "width:52px;flex:none" }, ANALYST[n] || n),
+        el("span", { class: "grow ellipsis" }, `短${BIAS[c.bias_short]} 长${BIAS[c.bias_long]} 置信${CONF[c.confidence]}`),
+        el("span", { class: "sub" }, ["1d", "3d", "20d", "60d"].map((k) => mark(c.outcomes[k])).join(" · ")))))))));
+  return box;
+}
+
+/* ── 行情 ───────────────────────────────────────────────────────────── */
+function renderMarket(d) {
+  const panel = clear(document.getElementById("panel-market"));
+  const s = d.snapshot || {}, p = plan(d);
+  const seg = el("div", { class: "seg", role: "group", "aria-label": "时间范围" }, [["1d", "1 天"], ["7d", "7 天"]].map(([k, l]) =>
+    el("button", { type: "button", "aria-pressed": String(priceRange === k), onclick: (e) => {
+      priceRange = k; e.currentTarget.parentNode.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); drawPrice(); } }, l)));
+  panel.appendChild(card("XAUUSD 走势", seg, el("div", { class: "chart", id: "price-chart" }),
+    s.signals ? el("div", { class: "chips", style: "margin-top:10px" }, Object.entries(s.signals).map(([k, v]) => el("span", { class: "chip" }, `${k} ${v}`))) : null));
+
+  const planCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "短线计划与点位"),
+    el("span", { class: "sub" }, s.plan_source === "ai" ? "AI 版（消息面来自 AI）" : "原版（消息面按震荡）")));
+  if (!p || !p.ok) planCard.appendChild(el("div", { class: "empty" }, s.market_open === false ? "休市中" : "暂无计划"));
+  else {
+    planCard.appendChild(el("div", { class: "kv" },
+      el("span", { class: "k" }, "结论"), el("span", {}, el("strong", {}, ACTION[p.action] || p.action), "  ", p.summary),
+      el("span", { class: "k" }, "门控"), el("span", {}, p.gate_text),
+      el("span", { class: "k" }, "消息面 M"), el("span", {}, `${p.axis_m.axis} · ${p.axis_m.note.split("；⚠️")[0]}`),
+      el("span", { class: "k" }, "价位 L"), el("span", {}, `${p.axis_l.axis} · ${p.axis_l.note}`),
+      el("span", { class: "k" }, "信号 S"), el("span", {}, `${p.axis_s.axis} · ${p.axis_s.note}`)));
+    const rows = [...p.resistance.map((r, i) => ({ label: `R${i + 1}`, ...r })), { label: "P 轴心", price: p.pivot, cny: null, reasons: ["(高+低)/2"] },
+                  { label: "▶ 现价", price: s.xauusd, cny: (s.bank_est || {})[d.bank], reasons: [], now: true },
+                  ...p.support.map((r, i) => ({ label: `S${i + 1}`, ...r }))].sort((a, b) => b.price - a.price);
+    planCard.appendChild(el("div", { class: "table-wrap", style: "margin-top:12px" }, el("table", {},
+      el("thead", {}, el("tr", {}, el("th", {}, "点位"), el("th", {}, "XAUUSD"), el("th", {}, "元/克"), el("th", { class: "wrap" }, "依据"))),
+      el("tbody", {}, rows.map((r) => el("tr", { style: r.now ? "font-weight:650" : null }, el("td", {}, r.label), el("td", {}, num(r.price, 1)),
+        el("td", {}, r.cny ? num(r.cny, 1) : "—"), el("td", { class: "wrap sub" }, (r.reasons || []).join("、"))))))));
+  }
+
+  const macro = d.macro || {};
+  const quotes = macro.quotes || {};
+  const macroCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "宏观"),
+    el("span", { class: "sub" }, macro.fetched_at ? `更新 ${fmtTs(macro.fetched_at)}` : "")));
+  if (Object.keys(quotes).length) {
+    macroCard.appendChild(el("div", { class: "mini-stats", style: "margin-top:0;grid-template-columns:repeat(2,1fr)" }, Object.entries(quotes).map(([k, q]) =>
+      el("div", { class: "mini-stat" }, el("div", { class: "l" }, k), el("div", { class: "v" }, num(q.value, k.includes("人民币") ? 4 : k.includes("收益率") ? 3 : 2),
+        el("span", { class: "sub", style: "font-weight:400" }, `  ${arrow(q.change_pct)} ${signed(q.change_pct)}%`))))));
+  }
+  const cal = (macro.calendar || []).filter((e) => !e.released || new Date(e.time_utc) > Date.now() - 36 * 3600e3);
+  macroCard.appendChild(el("h3", { class: "card-title", style: "margin:16px 0 4px;font-size:14px" }, "经济日程（北京时间）"));
+  macroCard.appendChild(cal.length ? el("ul", { class: "list" }, cal.map((e) => el("li", {}, el("div", { class: "row" },
+    el("span", { class: "sub", style: "width:76px;flex:none" }, e.time_bj),
+    el("span", { class: "grow" }, e.tier === 1 ? el("span", { class: "tag", style: "border-color:var(--critical);color:var(--critical);margin-right:6px" }, "重大") : null, `${COUNTRY_CN[e.country] || e.country} ${eventName(e.title)}`)),
+    el("div", { class: "sub", style: "padding-left:86px" }, e.released ? `实际 ${e.actual} · 预期 ${e.forecast ?? "—"} · 前值 ${e.previous ?? "—"}` : `预期 ${e.forecast ?? "—"} · 前值 ${e.previous ?? "—"}`)))) : el("div", { class: "empty" }, "暂无日程数据（监控程序每 30 分钟更新）"));
+  const flashes = d.jin10 || [];
+  const flashCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "金十快讯 · 与金价相关"),
+    el("span", { class: "sub" }, "标「重要」的为金十标红快讯，交易时段内会触发 AI 分析")),
+    flashes.length ? el("ul", { class: "list" }, flashes.map((x) => el("li", {},
+      el("div", { class: "row", style: "align-items:flex-start" },
+        el("span", { class: "sub", style: "width:44px;flex:none;padding-top:1px" }, (x.time_bj || "").slice(11, 16)),
+        el("span", { class: "grow", style: "font-size:14px" },
+          x.important ? el("span", { class: "tag", style: "border-color:var(--critical);color:var(--critical);margin-right:6px" }, "重要") : null, x.text)),
+      el("div", { class: "sub", style: "padding-left:54px" }, (x.time_bj || "").slice(5, 10))))) : el("div", { class: "empty" }, "暂无相关快讯（每 2 分钟更新）"));
+  panel.appendChild(planCard);
+  panel.appendChild(flashCard);
+  panel.appendChild(macroCard);
+}
+function drawPrice() {
+  const c = document.getElementById("price-chart");
+  if (!c || !DATA) return;
+  const p = plan(DATA), refs = [];
+  if (p && p.ok && priceRange === "1d") {
+    if (p.resistance[0]) refs.push({ value: p.resistance[0].price, label: "R1 " + num(p.resistance[0].price, 0) });
+    if (p.support[0]) refs.push({ value: p.support[0].price, label: "S1 " + num(p.support[0].price, 0) });
+    refs.push({ value: p.pivot, label: "P " + num(p.pivot, 0) });
+  }
+  lineChart(c, { series: [{ key: "xau", name: "XAUUSD", color: "var(--series-1)", points: DATA.prices[priceRange] }],
+    yFormat: (v) => num(v, 0), tipFormat: (v) => num(v, 2), refLines: refs, emptyText: "价格数据积累中" });
+}
+
+/* ── 记录 ───────────────────────────────────────────────────────────── */
+function renderRecords(d) {
+  const panel = clear(document.getElementById("panel-records"));
+  const keys = [...new Set(d.fills.map((f) => f.strategy))];
+  if (fillFilter !== "all" && !keys.includes(fillFilter)) fillFilter = "all";
+  const filters = el("div", { class: "chips", style: "margin-bottom:6px" }, [["all", "全部"], ...keys.map((k) => [k, d.strategy_names[k] || k])].map(([k, l]) =>
+    el("button", { class: "filter-btn", type: "button", "aria-pressed": String(fillFilter === k), onclick: () => { fillFilter = k; renderRecords(DATA); } },
+      k !== "all" ? el("span", { class: "swatch", style: `background:${seriesColor(k)}` }) : null, l)));
+  const fills = d.fills.filter((f) => fillFilter === "all" || f.strategy === fillFilter);
+  panel.appendChild(card("日线策略成交", el("span", { class: "sub" }, "最近 20 笔"), filters,
+    fills.length ? el("ul", { class: "list" }, fills.map((f) => el("li", {}, el("div", { class: "row" },
+      el("span", { class: "swatch", style: `background:${seriesColor(f.strategy)}` }),
+      el("span", { class: "grow" }, `${d.strategy_names[f.strategy] || f.strategy} ${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`),
+      el("span", { class: "sub", style: "white-space:nowrap" }, fmtTs(f.ts))), el("div", { class: "sub" }, f.reason + (f.fee ? ` · 手续费 ${num(f.fee)}` : ""))))) : el("div", { class: "empty" }, "暂无成交")));
+  panel.appendChild(card("提醒记录", el("span", { class: "sub" }, "最近 20 条"),
+    d.alerts.length ? el("ul", { class: "list" }, d.alerts.map((a) => el("li", {}, el("div", { class: "row" },
+      el("span", { class: "grow" }, a.title), el("span", { class: "sub" }, fmtTs(a.ts))),
+      el("div", { class: "sub" }, a.delivered ? "已推送微信" : "未推送（仅记录）")))) : el("div", { class: "empty" }, "暂无提醒")));
+}
+
+/* ── 渲染调度 ───────────────────────────────────────────────────────── */
+function renderActiveCharts() {
+  if (!DATA) return;
+  if (activeTab === "overview") sparkline(document.getElementById("spark"), DATA.prices["1d"]);
+  if (activeTab === "strategies") drawEquity();
+  if (activeTab === "market") drawPrice();
+}
+function render() {
+  if (!DATA) return;
+  const s = DATA.snapshot || {};
+  const chip = clear(document.getElementById("market-chip"));
+  chip.appendChild(el("span", { class: "dot", style: `background:${s.market_open ? "var(--good)" : "var(--text-3)"}` }));
+  chip.appendChild(document.createTextNode(s.market_open ? "交易中" : "休市"));
+  document.getElementById("updated").textContent = s.ts ? `行情 ${bjTime.format(new Date(s.ts))}` : "";
+  renderOverview(DATA); renderStrategies(DATA); renderAI(DATA); renderMarket(DATA); renderRecords(DATA);
+  renderActiveCharts();
+}
+async function load() {
+  try {
+    const r = await fetch("/api/dashboard", { cache: "no-store", credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    DATA = await r.json();
+    render();
+  } catch (e) {
+    document.getElementById("updated").textContent = "加载失败，稍后重试";
+  }
+}
+buildTabs();
+showTab(activeTab, false);
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderActiveCharts, 150); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themeMode === "auto") applyTheme("auto"); });
+load();
+setInterval(() => { if (!document.hidden) load(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

@@ -116,11 +116,14 @@
 - **Playwright + Chromium**（可选，但强烈推荐）：京东金融银行积存金页面与金友圈帖子需要它
 
 ```bash
-pip install playwright requests
-playwright install chromium
+pip install -r requirements.txt
+python -m playwright install chromium   # Linux 首次安装可加 --with-deps 补系统库
 ```
 
 > 没有 Playwright 也能跑：脚本会自动回退到 `latestPrice` API 兜底，并在报告中明确标注降级。
+
+- **浏览器串行**：金友圈抓取和银行报价两个脚本都会启动 Chromium，请依次运行、不要同时开（低配机器并发会超时）。
+- **网络代理**：境外数据源（CNBC 现货金、汇率 API）默认走本机 Clash `http://127.0.0.1:7890`。代理地址不同可设 `GOLD_TRADING_HTTP_PROXY=http://host:port`，不需要代理则设 `GOLD_TRADING_HTTP_PROXY=`（空）直连。
 
 ---
 
@@ -242,6 +245,10 @@ gemini skills install https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git
 不想跑完整工作流，只想看一下当前银行报价或博主观点？两个脚本都能独立执行：
 
 ```bash
+# 下面两个 Chromium 脚本请依次运行，不要同时跑
+# XAUUSD 现货价 + USD/CNY 汇率 + 理论换算价（任一源失败输出 null，不用估计值补位；不开浏览器）
+python "./.claude/skills/gold-analysis/scripts/live_market_data.py"
+
 # 浙商 / 民生积存金报价（Playwright 优先，失败自动 fallback 到 JD API）
 python "./.claude/skills/gold-analysis/scripts/fetch_bank_quotes.py"
 
@@ -249,9 +256,54 @@ python "./.claude/skills/gold-analysis/scripts/fetch_bank_quotes.py"
 python "./.claude/skills/gold-analysis/scripts/fetch_jd_personal_latest_post.py"
 ```
 
-两者都输出**人类可读摘要 + 完整 JSON**，方便接入下游分析。
+三者都输出**人类可读摘要 + 完整 JSON**，方便接入下游分析。
 
 **没有 Playwright 又想读银行页面？** 在 Cursor 里可以让 Agent 走 `cursor-ide-browser` MCP（`browser_navigate` → `browser_lock` → `browser_snapshot` → `browser_unlock`）；其他 Agent 则会按 `.claude/skills/gold-analysis/SKILL.md` 阶段 2 的降级流程自动切换到搜索/SGE/理论换算兜底，并在报告中明确标注数据来源等级。
+
+---
+
+## 📡 实时监控程序（monitor/）
+
+基于本 skill 的常驻监控：每分钟取价，触及关键点位、1 小时异动、门控切换、进入低吸区时推送微信；同时运行**多策略模拟盘**，隔一段时间看哪种策略真正赚钱。**不会真实下单。**
+
+| 策略 | 规则 | 交易频率 |
+|---|---|---|
+| 买入持有 `hold` | 基准：起始日全部买入，一直持有 | 1 次 |
+| 每月定投 `dca` | 基准：本金分 24 个月等额买入，从不卖出 | 每月 1 次 |
+| 智能定投 `dca_smart` | 定投；回撤 ≥10% 加倍、RSI>75 半份；从不卖出 | 每月 1 次 |
+| 中长线趋势 `position` | SMA200 上升趋势中按回撤分三批买；浮盈≥25% 且过热止盈 1/3；跌破 SMA200×97% 清仓 | 每年约 3 次 |
+| 智能定投+AI `dca_smart_ai` | 智能定投金额 × AI 系数（看多高置信 ×1.5、看空 ×0.5、硬事件 ×0.75） | 每月 1 次 |
+| 中长线趋势+AI `position_ai` | 趋势规则不变；AI 看空或有硬事件时暂停加仓，高置信看空减仓一半 | 每年数次 |
+| 短线日内 `short` / `short_ai` | 原 skill 三轴 + 门控，单笔 10 克；原版消息面固定震荡，+AI 版消息面来自 AI | 视行情 |
+
+- **AI 消息面分析**（`monitor/ai.py`）：**Claude 与 Codex 并发、用同一份上下文各自判断**（Claude 有 `ANTHROPIC_API_KEY` 走 API，否则复用本机 Claude Code；Codex 复用本机 codex CLI；均计入各自订阅用量），策略默认用 Claude 的判断，可改为 `consensus`（两者一致才采用）；**金十数据快讯**每 2 分钟抓取，近 24 小时与金价相关的快讯作为 AI 主要消息来源（联网搜索降到每次最多 2 次），金十标红的重要快讯在交易时段触发 AI（每天最多 4 次）；**AI 判断成绩单**按 AI 分别计分并统计一致/分歧时的准确率：工作日 08:40（开盘前）/20:45（美国数据公布后）与 1 小时异动时运行，输出方向/置信度/硬事件/驱动因素，**不输出价位**；每次判断与来源存档。买入持有、每月定投保持不用 AI，作为衡量 AI 是否有增益的基准；AI 版策略无法历史回测，只能在模拟盘上与其基础版对比
+- 日线策略各有独立账户（默认本金各 10 万元），每个交易日 09:05 后按银行实时价成交一次，卖出扣 0.4%
+- 每天 9 点、20 点的计划摘要附战绩榜；**每周六 10 点推送模拟盘周报**；随时可用 `--stats` 查看
+- 日线策略与回测共用同一份规则（`monitor/strategies.py`），`python3 -m monitor.backtest` 用 2010 年至今日线回测
+
+> 回测（2011–2026，卖出手续费 0.4%）：买入持有 2.95×（最大回撤 44%）、每月定投 2.66×、中长线趋势 1.84×（最大回撤 23%）。趋势择时在 54 组参数下回撤全部更小、收益全部低于买入持有——它买的是「少亏」不是「多赚」。历史不代表未来。
+
+- 技术面来自 TradingView 扫描接口（30m/1H/4H/日线/周线评级 + 指标，无需浏览器），CNBC 交叉核验并判断休市
+- 银行页面（Chromium）每 20 分钟校准一次浙商/民生换算比，其余时间按「XAUUSD × 换算比」实时推算积存金价
+- 点位、轴心、三轴、门控、R:R 全部由 `scripts/gold_calc.py` 代码计算；**R:R 与模拟盘均按卖出手续费 0.4% 计算**
+- 数据存 SQLite（`monitor/data/monitor.db`）
+
+```bash
+cp .env.example .env          # 填 PUSHPLUS_TOKEN 或 SERVERCHAN_SENDKEY
+python3 -m monitor --once     # 跑一轮看计划（不推送）
+python3 -m monitor --stats    # 各策略模拟盘战绩
+python3 -m monitor.backtest   # 历史回测（--trades 列出逐笔）
+
+# 常驻（systemd）
+cp deploy/gold-monitor.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now gold-monitor
+journalctl -u gold-monitor -f # 看日志
+
+# 网页看板（行情、计划、AI 判断、各策略收益曲线；只读数据库）
+cp deploy/gold-web.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now gold-web
+# 默认只监听 127.0.0.1:8080；对外访问见 .env.example 中 GOLD_WEB_* 配置
+```
 
 ---
 
@@ -342,6 +394,10 @@ python "./.claude/skills/gold-analysis/scripts/fetch_jd_personal_latest_post.py"
 Trade-Accumulated-Gold-CN/
 ├── README.md                               # 本文档
 ├── Trade-Accumulated-Gold-CN.png          # 工作流程示意图（见「工作原理」）
+├── requirements.txt                        # Python 依赖（requests / playwright / yfinance）
+├── .env.example                            # 监控程序配置模板（推送 token、调参）
+├── monitor/                                # 实时监控 + 模拟盘常驻程序（python3 -m monitor）
+├── deploy/                                 # systemd 服务文件（gold-monitor 监控 / gold-web 网页看板）
 ├── .gitignore                              # 仅保留一份示例报告纳入版本库（见下）
 └── .claude/
     └── skills/                             # 可并列多个技能子目录（本仓库默认提供 gold-analysis）
@@ -356,7 +412,12 @@ Trade-Accumulated-Gold-CN/
             └── scripts/
                 ├── fetch_bank_quotes.py    # 浙商/民生银行积存金报价（Playwright + JD API 兜底）
                 ├── fetch_jd_personal_latest_post.py  # 京东金融金友圈[黄金小小彬]最新观点抓取
-                ├── live_market_data.py     # XAUUSD 实时价 + USD/CNY 汇率
+                ├── live_market_data.py     # XAUUSD 实时价 + USD/CNY 汇率（与 fetch_bank_quotes.py 并行运行）
+                ├── net_proxy.py            # 境外数据源共用代理配置（GOLD_TRADING_HTTP_PROXY）
+                ├── gold_calc.py            # 确定性计算：换算/手续费/R:R/轴心/三轴/门控/点位
+                ├── tv_signals.py           # TradingView 多时间框架信号（Investing.com 不可达时的备选）
+                ├── macro_data.py           # 经济日历（硬事件判定）+ 美元指数/美债/离岸人民币
+                ├── jin10_flash.py          # 金十数据快讯：抓取并筛出与金价相关条目（重要快讯触发 AI）
                 └── ...                     # 其余 test_*.py 为各数据源探活脚本
 ```
 

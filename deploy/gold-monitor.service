@@ -1,0 +1,19 @@
+[Unit]
+Description=Gold accumulation (积存金) realtime monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Trade-Accumulated-Gold-CN
+ExecStart=/usr/bin/python3 -m monitor
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+# 复用本机 Claude Code 登录（AI 后端 claude_code）需要能找到 /root/.claude 下的凭据
+Environment=HOME=/root
+# 低配机器保护：限制内存，避免 Chromium 校准时拖垮系统
+MemoryMax=900M
+
+[Install]
+WantedBy=multi-user.target

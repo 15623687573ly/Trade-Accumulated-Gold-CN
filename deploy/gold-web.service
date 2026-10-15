@@ -1,0 +1,15 @@
+[Unit]
+Description=Gold accumulation (积存金) web dashboard
+After=gold-monitor.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Trade-Accumulated-Gold-CN
+ExecStart=/usr/bin/python3 -m monitor.web
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+MemoryMax=150M
+
+[Install]
+WantedBy=multi-user.target
