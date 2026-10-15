@@ -1,9 +1,9 @@
 import yfinance as yf
-import os
 
-os.environ['http_proxy']='http://127.0.0.1:7890'
-os.environ['https_proxy']='http://127.0.0.1:7890'
+from net_proxy import apply_proxy
 
-gold = yf.Ticker("XAUUSD=X")
+apply_proxy()
+
+gold = yf.Ticker("GC=F")  # XAUUSD=X 已无数据，改用 COMEX 黄金期货
 current_price = gold.fast_info['lastPrice']
-print("SUCCESS YFINANCE SPOT GOLD: ", current_price)
+print("SUCCESS YFINANCE COMEX GOLD FUTURES: ", current_price)

@@ -1,9 +1,9 @@
 import urllib.request
 import json
-import os
 
-os.environ['http_proxy']='http://127.0.0.1:7890'
-os.environ['https_proxy']='http://127.0.0.1:7890'
+from net_proxy import apply_proxy
+
+apply_proxy()
 
 url = 'https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols=XAU='
 headersStr = {

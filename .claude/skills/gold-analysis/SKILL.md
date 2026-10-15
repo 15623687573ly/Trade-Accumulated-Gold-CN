@@ -12,13 +12,15 @@ description: 中国黄金积存金短线交易AI智能分析工具。实时搜�
 - **交易节奏**: 小时/天级别短线，快进快出，利用黄金波动赚差价
 - **数据原则**: 越实时越好，数据延迟=判断失效，必须标注每条数据的获取时间
 - **收益目标**: 通过多次高胜率操作复利积累，目标资产翻倍
-- **积存金特点**: 无杠杆，每次涨跌约1-3%，需选择波动大的窗口（地缘事件、重大数据发布日）入场，买卖价差约0.5-1元/克需计入成本
+- **积存金特点**: 无杠杆，每次涨跌约1-3%，需选择波动大的窗口（地缘事件、重大数据发布日）入场，**卖出手续费 0.4%（买入 0%）**，按现价约 3.5–4 元/克，金价需上涨约 0.4% 才保本，必须计入每笔 R:R
 
 ## 工作流程
 
+**路径约定**：下文 Python 命令中的 `<SkillRoot>` 均指本技能目录 `gold-analysis/`（即本 `SKILL.md` 所在目录，含 `scripts/`、`references/`、`assets/`）。克隆整个仓库时它位于 `<仓库根>/.claude/skills/gold-analysis`，例如 `~/.claude/skills/Trade-Accumulated-Gold-CN/.claude/skills/gold-analysis`；Windows 示例：`D:\AI Workspace\finance agent\.agents\skills\Trade-Accumulated-Gold-CN\.claude\skills\gold-analysis`。执行时将 `<SkillRoot>` 替换为实际绝对路径。
 
+**浏览器约定**：`fetch_jd_personal_latest_post.py` 与 `fetch_bank_quotes.py` 都会启动 Chromium，**同一时间只运行其中一个**（前一个结束再跑下一个）；低配机器上多个 Chromium 并发会导致页面渲染超时。不启动浏览器的 `live_market_data.py` 和 WebFetch/web_search 可与它们并行。
 
-**路径约定**：下文 Python 命令中的 `<SkillRoot>` 均指本技能包根目录（含 `SKILL.md` 与 `scripts/`，目录名常为 `Trade-Accumulated-Gold-CN`）。Windows 示例：`D:\AI Workspace\finance agent\.agents\skills\Trade-Accumulated-Gold-CN`。执行时将 `<SkillRoot>` 替换为实际绝对路径。
+**网络约定**：境外数据源（CNBC、汇率 API）默认经本机 Clash 代理 `http://127.0.0.1:7890`；可通过环境变量 `GOLD_TRADING_HTTP_PROXY` 修改，设为空字符串则直连。
 
 用户触发后按以下4个阶段顺序执行：
 
@@ -26,7 +28,7 @@ description: 中国黄金积存金短线交易AI智能分析工具。实时搜�
 
 **目标**: 小时级别消息面汇总，输出市场情绪标签
 
-1. 使用 `web_search` 搜集最近1-4小时黄金相关消息：
+1. 先运行 `python "<SkillRoot>/scripts/jin10_flash.py"` 取金十数据最新快讯中与金价相关的条目（🔴 为金十标红的重要快讯，北京时间），再用 `web_search` 补充最近1-4小时黄金相关消息（金十已覆盖的不必重复搜索，引用金十时注明「金十快讯 时间」）：
   - **宏观经济**: 美联储利率决议、非农数据、CPI/PPI、GDP、失业率
   - **地缘政治**: 军事冲突、贸易摩擦、制裁动态
   - **央行动态**: 各国央行购金/售金、外汇储备变动
@@ -49,7 +51,7 @@ description: 中国黄金积存金短线交易AI智能分析工具。实时搜�
 
 1. **京东金融「金友圈」最新观点精选（社区共识，与阶段1并列的定性输入）**
 
-**目标**: 抓取[@黄金小小彬](https://roma.jd.com/content/personal?contentId=jimu_user_info-12066789&romaFileName=pageCommunityPersonal)个人动态流**最新一条**的金圈博主观点汇总文本，作为多博主共识参考；**失败不阻塞**后续阶段2/3，但须在报告中如实标注。
+**目标**: 抓取[@黄金小小彬](https://roma.jd.com/content/personal?contentId=jimu_user_info-12066789&romaFileName=pageCommunityPersonal)个人动态流中**最新一条标题含「金友圈」**的博主观点汇总文本（该博主同时发「基金圈观点精选」，脚本已自动跳过；可用 `--keyword` 调整），作为多博主共识参考；**失败不阻塞**后续阶段2/3，但须在报告中如实标注。
 
 - **运行脚本**（依赖 `playwright` + `chromium`，见脚本文件头注释）：
   ```
@@ -76,12 +78,14 @@ description: 中国黄金积存金短线交易AI智能分析工具。实时搜�
 **【数据获取决策流程】**
 
 ```
-STEP 1: 运行 Python 脚本获取 XAUUSD + 银行报价
+STEP 1: 运行两个 Python 脚本获取 XAUUSD/汇率 + 银行报价（银行脚本须在金友圈脚本结束后再跑）
          ↓
    [评估1] fetch_bank_quotes.py 中 banks.zheshang.status == "ok"
    并且    banks.minsheng.status == "ok"（Playwright XPath 成功）？
          ↓ YES → ✅ 使用脚本结果，跳过 STEP 2 和 STEP 3，进入技术分析
          ↓ NO  → 继续 STEP 2
+         ↓
+STEP 2: 读取同一份 fetch_bank_quotes.py 输出中的 JD API 兜底价（无需重新执行）
          ↓
    [评估2] 脚本输出中是否有有效的 jd_latest_price（JD API 兜底价格）？
          ↓ YES → ⚠️ 使用 JD API 兜底价格并标注"非银行实盘成交价"，跳过 STEP 3，进入技术分析
@@ -96,7 +100,7 @@ STEP 3: 使用内置浏览器 MCP 直接导航银行页面（最终兜底）
 
 ---
 
-**🥇 STEP 1 — Python 脚本（首选，两条命令可并行运行）**:
+**🥇 STEP 1 — Python 脚本（首选；live_market_data.py 可与任何步骤并行，fetch_bank_quotes.py 须等阶段1 的金友圈脚本结束后再运行，保证同一时间只有一个 Chromium）**:
 
 ```
 XAUUSD + USD/CNY 汇率：
@@ -109,13 +113,15 @@ XAUUSD + USD/CNY 汇率：
 执行后立即检查 `fetch_bank_quotes.py` 的 JSON 输出：
 
 - `banks.zheshang.status == "ok"` 且 `banks.minsheng.status == "ok"` → **✅ 数据完整，直接使用，不再执行 STEP 2/3**
-- 任意一个 `status == "error"` 但 `jd_latest_price` 存在有效价格 → **⚠️ 降级使用 JD API 兜底价并标注，不再执行 STEP 3**
+- 任意一个 `status == "error"` 但 `jd_latest_price` 存在有效价格 → **🥈 STEP 2：降级使用 JD API 兜底价并标注「非银行实盘成交价」，不再执行 STEP 3**
 - 两者均失败 → **进入 STEP 3**
 
-**🥈 STEP 3 — 内置浏览器 MCP（仅当 STEP 1 完全失败时执行）**:
+`live_market_data.py` 的 JSON 中 `xauusd.status` / `usdcny.status` 为 `error` 时，对应数值为 `null`：XAUUSD 改用下方 Investing.com 报价，汇率改走「搜索A」，**禁止用估计值补位**。
+
+**🥉 STEP 3 — 内置浏览器 MCP（仅当 STEP 1、STEP 2 均未拿到银行价格时执行）**:
 
 ```
-使用 MCP cursor-ide-browser 工具，依次导航：
+使用 Agent 内置浏览器工具（Cursor 为 cursor-ide-browser MCP，其他 Agent 用各自的浏览器/WebFetch 工具），依次导航：
 - 浙商: https://m.jdjygold.com/finance-gold/gold-standard/home/?productSku=1961543816
 - 民生: https://m.jdjygold.com/finance-gold/newgold/home/
 
@@ -123,7 +129,23 @@ XAUUSD + USD/CNY 汇率：
 成功读取后立即使用，不再执行搜索兜底。
 ```
 
-> ⚡ 这一步是短线交易的核心，必须执行，获取 Bid/Ask 实时价和多时间框架信号。
+**📈 必做 — Investing.com 实时盘口 + 多时间框架信号 + 经济日历（与 STEP 1 并行，不属于上面的降级链）**:
+
+```
+WebFetch: https://www.investing.com/currencies/xau-usd
+获取: Bid/Ask 实时价、30min/1H/5H/日线/周线 技术信号、当日经济日历
+```
+
+**🗓️ 经济日历 + 美元/美债/离岸人民币（程序直取，秒级，与上面并行）**:
+
+```
+python "<SkillRoot>/scripts/macro_data.py"
+```
+
+输出未来 7 天美/中重要日程（北京时间，含已公布的实际值/预期/前值）与美元指数、美债 2Y/10Y、USD/CNH。
+标「🔴硬事件」的（议息、美联储主席讲话、非农、CPI、核心 PCE）24 小时内未公布时，报告中按「硬事件」处理；日程时间以此为准，不用搜索结果里的时间。
+
+> ⚡ 这一步是短线交易的核心，必须执行。若返回 403/超时：用 web_search 搜 "XAUUSD technical analysis 30 min 1 hour" 等二手来源综合判断，并在报告「多时间框架技术信号」表上方标注「Investing.com 不可达，以下信号为二手来源估算」。
 
 **搜索A — USD/CNY汇率（实时即期汇率）**:
 
@@ -145,7 +167,7 @@ web_search: "美元兑人民币 今日汇率" 或 "USD CNY spot rate today"
 
 注意:
 1. 搜索摘要中的价格须带时间戳，拒绝使用"1天前"等过期数据
-2. 若获取到的是 Au99.99 代理价，须在报告中注明偏差范围 ±5元/克
+2. 若获取到的是 Au99.99 代理价，须在报告中注明偏差范围 ±5元/克（与 3.4「🥈备选」一致）
 ```
 
 **搜索C — 黄金TD价格（辅助验证溢价）**:
@@ -193,12 +215,10 @@ web_search: "黄金TD Au(T+D) 实时价格"
 
 **统一原则**: 所有点位结合盘面实时走势，不硬套固定公式、跟着当下资金情绪走，点位精简实用只给关键有效位置。
 
-1. 计算轴心位：
-
-采用自定义算法（更贴合当下市场结构）：
+1. 计算轴心位（两种轴心都展示，互相印证）：
 
 ```
-P(轴心) = (R1 + S1) ÷ 2
+P(结构轴心) = (R1 + S1) ÷ 2
 
 其中:
   R1 = 第一压力位（最小数值压力位）
@@ -206,7 +226,11 @@ P(轴心) = (R1 + S1) ÷ 2
 
 盘中补充算法（使用今日已确认的实际高低点）:
   P(盘中轴心) = (今日实际最高价 + 今日实际最低价) ÷ 2
-  → 盘中两种轴心都展示，互相印证
+
+统一用法:
+  - 报告点位表中的「P 轴心」与 AxisL 判断，一律使用 P(盘中轴心)
+  - P(结构轴心) 写在「轴心位解读」中作为对照
+  - 非交易时段（周末/休市）无今日高低点时，用最近一个交易日的高低点并注明
 ```
 
 **轴心位用途**:
@@ -266,7 +290,10 @@ P(轴心) = (R1 + S1) ÷ 2
 
 ```
 R:R = (目标收益) ÷ (止损距离) ≥ 1.5:1
-例: 入场 1,162元/克，止损 1,153元/克（-9元），目标 1,179元/克（+17元）→ R:R = 1.9:1 ✅
+按实际到手计算（卖出手续费 0.4%）：
+  收益 = 目标价 × 99.6% − 入场价；风险 = 入场价 − 止损价 × 99.6%
+例: 入场 884.0，止损 879.5，目标 897.0 元/克 → 收益 897.0×0.996−884.0 = 9.41；风险 884.0−879.5×0.996 = 8.02 → R:R = 1.17 ❌（不扣手续费会误算成 2.9）
+可直接调用 scripts/gold_calc.py 的 risk_reward_long(..., sell_fee_rate=0.004) 与 breakeven_price()
 ```
 
 #### 3.4 积存金点位换算 — 三级获取策略（详见 [accumulation-gold.md](references/accumulation-gold.md)）
@@ -285,14 +312,14 @@ R:R = (目标收益) ÷ (止损距离) ≥ 1.5:1
 ```
 优先核验来源（默认先查这两个页面）:
 - 浙商积存金: https://m.jdjygold.com/finance-gold/gold-standard/home/?productSku=1961543816
-  XPath: //*[@id="mainCSC"]/div/div[2]/div
+  XPath: //p[contains(normalize-space(.),'实时金价')]/following-sibling::div[1]
 - 民生积存金: https://m.jdjygold.com/finance-gold/newgold/home/
-  XPath: /html/body/div[1]/div/div[2]/div[3]/div[1]/div[1]
+  XPath: //p[contains(normalize-space(.),'实时金价')]/following-sibling::div[1]（两页相同，以「实时金价(元/克)」标题为锚点）
 
 浙商换算比 = 浙商积存金报价 ÷ 当前XAUUSD
 民生换算比 = 民生积存金报价 ÷ 当前XAUUSD
 溢价 = 银行报价 − 理论换算价
-⚠️ 强制合理性检验: 溢价（国内折溢价）通常在 -15 至 +25 元/克之间。若绝对值异常大（如>30元/克），说明抓取的报价有误（旧数据或不同产品）！必须暂停盲目计算，在报告中向用户核实验证真实盘口价格。
+⚠️ 强制合理性检验: 溢价（国内折溢价）通常在 -15 至 +15 元/克之间。若绝对值 > 30 元/克，说明抓取的报价有误（旧数据或不同产品）！必须暂停盲目计算，在报告中向用户核实验证真实盘口价格。
 各点位积存金价 = XAUUSD关键点位 × 对应换算比
 → 标注: "基于银行实时报价换算"
 ```
@@ -351,13 +378,13 @@ SGE数据已是小时前的数据。若XAUUSD较SGE收盘后又大幅变动（>$
 ### Do（要做）
 
 - ✅ **必须将最终分析报告保存为文件**: 每次工作流的最后一步必须是将 Markdown 内容保存到 `assets/YYYY-MM-DD-HHmm-gold-analysis.md` 中。
-- ✅ **首先 WebFetch investing.com/currencies/xau-usd**，获取实时 Bid/Ask + 多时间框架信号 + 经济日历，这是最快的数据来源
+- ✅ **阶段2 一开始就并行执行 live_market_data.py + fetch_bank_quotes.py（此时金友圈脚本应已结束）+ WebFetch investing.com/currencies/xau-usd**，分别获取 XAUUSD/汇率/银行报价 与 Bid/Ask + 多时间框架信号 + 经济日历
 - ✅ 标注每条数据的获取时间（精确到分钟），数据超过30分钟视为过时
 - ✅ 在报告顶部「当前状态速览」下展示**两行核心结论**：**综合倾向（三轴 AxisM/L/S）** + **执行门控（30m/1H）**；前者定方向预期，后者定当下是否可下单，避免用户误以为仅看短线信号
 - ✅ 阶段1末尾运行 `fetch_jd_personal_latest_post.py`（路径见 `<SkillRoot>`），将金友圈写入报告并计入数据来源；失败则如实标注，不编造
 - ✅ 所有点位同时展示国际金价(XAUUSD)和积存金换算价(元/克)
 - ✅ 每笔交易必须给出止损位和风险收益比（R:R ≥ 1.5:1）
-- ✅ 盘中使用 P=(今日高+今日低)÷2 计算实时轴心
+- ✅ 盘中使用 P(盘中轴心)=(今日高+今日低)÷2 作为点位表与 AxisL 的轴心，P(结构轴心)=(R1+S1)÷2 作对照
 - ✅ 当美元指数DXY单日波动 >0.5% 时，必须说明对国内积存金价格的影响（美元涨→积存金涨幅缩小；美元跌→积存金涨幅放大）
 - ✅ 区分消息面的时效性（小时级别 vs 日级别）
 - ✅ 报告末尾必须包含「五、数据来源」章节，逐一列出每条数据的来源并在平台名处**附加URL链接**
@@ -368,7 +395,7 @@ SGE数据已是小时前的数据。若XAUUSD较SGE收盘后又大幅变动（>$
 - ❌ **不在执行门控为「不执行新开多/不抄底」时给出与门控矛盾的一键满仓建议**；门控为卖出时若三轴仍偏多，只能写「等待回调+门控改善」，不得写「立即追多」
 - ❌ **不用延时数据（SGE等）直接换算当前积存金价**，若XAUUSD已大幅变动，SGE数据已失效，改用理论换算法并注明
 - ❌ 不给出绝对化建议（如"必须买入"、"一定涨"）
-- ❌ 不忽略积存金的买卖价差成本（通常0.5-1元/克），每笔分析都要计入
+- ❌ 不忽略积存金的卖出手续费（浙商、民生均为卖出金额 0.4%，买入免费；两家均为买卖单一报价），每笔 R:R 都按「卖出到手 = 卖出价 × 99.6%」计算，并给出保本卖价
 - ❌ 不硬套固定公式，要跟着当下资金情绪和实时信号走
 - ❌ 不忽略"买预期卖事实"规律：重大利多消息落地后（如数据实际发布时），金价可能反向回调
 

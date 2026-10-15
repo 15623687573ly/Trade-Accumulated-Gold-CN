@@ -1,11 +1,11 @@
 import urllib.request
 import json
-import os
 
-os.environ['http_proxy']='http://127.0.0.1:7890'
-os.environ['https_proxy']='http://127.0.0.1:7890'
+from net_proxy import apply_proxy
 
-url = 'https://scanner.tradingview.com/forex/scan'
+apply_proxy()
+
+url = 'https://scanner.tradingview.com/cfd/scan'
 data = b'{"symbols":{"tickers":["OANDA:XAUUSD"]},"columns":["name","close","update_mode"]}'
 headersStr = {
     'User-Agent': 'Mozilla/5.0',

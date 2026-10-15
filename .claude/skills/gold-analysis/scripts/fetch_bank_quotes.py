@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -25,6 +26,11 @@ MOBILE_USER_AGENT = (
 
 JD_LATEST_PRICE_URL = "https://api.jdjygold.com/gw/generic/hj/h5/m/latestPrice"
 REQUEST_TIMEOUT_SECONDS = 20
+PAGE_ATTEMPTS = 2
+PRICE_WAIT_MS = 20000
+
+# 以「实时金价(元/克)」标题为锚点取紧随其后的价格块；比绝对路径 XPath 更能扛页面改版
+REALTIME_PRICE_XPATH = "//p[contains(normalize-space(.),'实时金价')]/following-sibling::div[1]"
 
 
 @dataclass(frozen=True)
@@ -40,13 +46,13 @@ BANK_PAGE_CONFIGS = [
         key="zheshang",
         display_name="浙商积存金",
         url="https://m.jdjygold.com/finance-gold/gold-standard/home/?productSku=1961543816",
-        xpath='//*[@id="mainCSC"]/div/div[2]/div',
+        xpath=REALTIME_PRICE_XPATH,
     ),
     BankPageConfig(
         key="minsheng",
         display_name="民生积存金",
         url="https://m.jdjygold.com/finance-gold/newgold/home/",
-        xpath="/html/body/div[1]/div/div[2]/div[3]/div[1]/div[1]",
+        xpath=REALTIME_PRICE_XPATH,
     ),
 ]
 
@@ -65,10 +71,9 @@ def extract_price(text: str) -> Optional[float]:
     if not matches:
         return None
     numeric_values = [float(item) for item in matches]
-    plausible_values = [value for value in numeric_values if 500 <= value <= 3000]
-    if plausible_values:
-        return plausible_values[0]
-    return numeric_values[0] if numeric_values else None
+    plausible_values = [value for value in numeric_values if 500 <= value <= 5000]
+    # 不在合理区间的数字（日期、SKU 等）宁可判失败也不当作价格
+    return plausible_values[0] if plausible_values else None
 
 
 def compact_error_message(message: str) -> str:
@@ -106,82 +111,101 @@ def launch_browser(playwright_obj):
     return playwright_obj.chromium.launch(headless=True)
 
 
-def fetch_quote_from_page(config: BankPageConfig) -> Dict[str, Any]:
-    if sync_playwright is None:
+def page_error(config: BankPageConfig, source: str, error: str) -> Dict[str, Any]:
+    return {
+        "status": "error",
+        "source": source,
+        "url": config.url,
+        "xpath": config.xpath,
+        "error": error,
+        "fetched_at": utc_now_iso(),
+    }
+
+
+def fetch_quote_from_page(browser, config: BankPageConfig) -> Dict[str, Any]:
+    context = None
+    try:
+        context = browser.new_context(
+            user_agent=MOBILE_USER_AGENT,
+            viewport={"width": 430, "height": 932},
+            device_scale_factor=3,
+            is_mobile=True,
+            has_touch=True,
+        )
+        page = context.new_page()
+        raw_text = ""
+        price = None
+        # 低配机器 / 多个 Chromium 并发时首屏渲染慢，「可见」判定可能迟迟不过；
+        # 价格文字挂进 DOM 即可读取，失败则刷新重试一次
+        for attempt_idx in range(PAGE_ATTEMPTS):
+            if attempt_idx == 0:
+                page.goto(config.url, wait_until="domcontentloaded", timeout=60000)
+            else:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            try:
+                page.wait_for_function(
+                    "xp => { const n = document.evaluate(xp, document, null,"
+                    " XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;"
+                    " return n && /\\d{3,5}\\.\\d/.test(n.textContent || ''); }",
+                    arg=config.xpath,
+                    timeout=PRICE_WAIT_MS,
+                )
+            except PlaywrightTimeoutError:
+                if attempt_idx == PAGE_ATTEMPTS - 1:
+                    raise
+                continue
+            raw_text = normalize_text(page.locator(f"xpath={config.xpath}").first.text_content() or "")
+            price = extract_price(raw_text)
+            if price is not None:
+                break
+
+        if price is None:
+            result = page_error(config, "playwright_xpath", "XPath命中了元素，但未能从文本中解析出价格。")
+            result["raw_text"] = raw_text
+            return result
+
         return {
-            "status": "error",
-            "source": "playwright_unavailable",
+            "status": "ok",
+            "source": "playwright_xpath",
             "url": config.url,
             "xpath": config.xpath,
-            "error": "Python package playwright is unavailable in current environment.",
+            "raw_text": raw_text,
+            "price": price,
             "fetched_at": utc_now_iso(),
+        }
+    except PlaywrightTimeoutError as exc:
+        return page_error(config, "playwright_xpath", f"页面或元素等待超时: {exc}")
+    except Exception as exc:
+        return page_error(config, "playwright_xpath", str(exc))
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+
+def fetch_all_pages() -> Dict[str, Dict[str, Any]]:
+    """同一个 Chromium 实例依次抓取所有银行页面，避免每家银行都冷启动一次浏览器。"""
+    if sync_playwright is None:
+        return {
+            config.key: page_error(
+                config,
+                "playwright_unavailable",
+                "Python package playwright is unavailable in current environment.",
+            )
+            for config in BANK_PAGE_CONFIGS
         }
 
     try:
         with sync_playwright() as playwright_obj:
             browser = launch_browser(playwright_obj)
-            page = browser.new_page(
-                user_agent=MOBILE_USER_AGENT,
-                viewport={"width": 430, "height": 932},
-                device_scale_factor=3,
-                is_mobile=True,
-                has_touch=True,
-            )
-            page.goto(config.url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(5000)
-            locator = page.locator(f"xpath={config.xpath}")
-            locator.wait_for(state="visible", timeout=15000)
-            raw_text = normalize_text(locator.inner_text(timeout=15000))
-            price = extract_price(raw_text)
-            browser.close()
-
-            if price is None:
-                return {
-                    "status": "error",
-                    "source": "playwright_xpath",
-                    "url": config.url,
-                    "xpath": config.xpath,
-                    "raw_text": raw_text,
-                    "error": "XPath命中了元素，但未能从文本中解析出价格。",
-                    "fetched_at": utc_now_iso(),
-                }
-
-            return {
-                "status": "ok",
-                "source": "playwright_xpath",
-                "url": config.url,
-                "xpath": config.xpath,
-                "raw_text": raw_text,
-                "price": price,
-                "fetched_at": utc_now_iso(),
-            }
-    except PlaywrightTimeoutError as exc:
-        return {
-            "status": "error",
-            "source": "playwright_xpath",
-            "url": config.url,
-            "xpath": config.xpath,
-            "error": f"页面或元素等待超时: {exc}",
-            "fetched_at": utc_now_iso(),
-        }
-    except PlaywrightError as exc:
-        return {
-            "status": "error",
-            "source": "playwright_xpath",
-            "url": config.url,
-            "xpath": config.xpath,
-            "error": str(exc),
-            "fetched_at": utc_now_iso(),
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "source": "playwright_xpath",
-            "url": config.url,
-            "xpath": config.xpath,
-            "error": str(exc),
-            "fetched_at": utc_now_iso(),
-        }
+            try:
+                return {config.key: fetch_quote_from_page(browser, config) for config in BANK_PAGE_CONFIGS}
+            finally:
+                browser.close()
+    except (PlaywrightError, Exception) as exc:
+        return {config.key: page_error(config, "playwright_xpath", str(exc)) for config in BANK_PAGE_CONFIGS}
 
 
 def fetch_bank_quotes() -> Dict[str, Any]:
@@ -198,8 +222,7 @@ def fetch_bank_quotes() -> Dict[str, Any]:
         "banks": {},
     }
 
-    for config in BANK_PAGE_CONFIGS:
-        bank_result = fetch_quote_from_page(config)
+    for key, bank_result in fetch_all_pages().items():
         if bank_result.get("status") != "ok" and jd_latest_price is not None:
             bank_result["fallback_price"] = jd_latest_price.get("price")
             bank_result["fallback_source"] = jd_latest_price.get("source")
@@ -207,7 +230,7 @@ def fetch_bank_quotes() -> Dict[str, Any]:
                 "页面XPath抓取失败，已附带京东金通用实时价作兜底参考；"
                 "该价格未必等同于银行实际成交价。"
             )
-        results["banks"][config.key] = bank_result
+        results["banks"][key] = bank_result
 
     if jd_latest_price is None:
         results["jd_latest_price_error"] = jd_latest_price_error
@@ -262,4 +285,8 @@ def print_human_summary(results: Dict[str, Any]) -> None:
 
 
 if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # 避免 Windows GBK 控制台打印中文/emoji 崩溃
+    except Exception:
+        pass
     print_human_summary(fetch_bank_quotes())

@@ -1,4 +1,10 @@
-import urllib.request; import json
+import json
+import urllib.request
+
+from net_proxy import apply_proxy
+
+apply_proxy()
+
 url = 'https://query1.finance.yahoo.com/v8/finance/chart/GC=F'
 headers={'User-Agent': 'Mozilla/5.0'}
 try:

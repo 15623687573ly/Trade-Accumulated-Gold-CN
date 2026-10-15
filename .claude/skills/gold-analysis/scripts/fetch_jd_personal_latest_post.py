@@ -1,8 +1,9 @@
 """
-抓取京东金融个人页「动态」列表中最新一条的标题节点信息及发布时间。
+抓取京东金融个人页「动态」列表中最新一条「金友圈」帖子的标题节点信息及发布时间。
 
 流程：
-  1. 打开个人主页，等待 feed 列表渲染，读取第一条 post 的标题文本和 content_id。
+  1. 打开个人主页，等待 feed 列表渲染，按顺序找第一条标题含「金友圈」的 post
+     （博主同时发「基金圈观点精选」，须跳过），读取标题文本和 content_id。
   2. 点击该 post 进入详情页，等待顶部时间元素出现，读取精确发布时间
      （选择器：p[data-jue-name="community_top_header.jue"]，
       典型文本：'2026-04-19 13:04 山东'）。
@@ -62,6 +63,11 @@ FEED_FALLBACK_SELECTORS = [
 # 典型文本："2026-04-19 13:04 山东"
 DETAIL_TIME_SELECTOR = 'p[data-jue-name="community_top_header.jue"]'
 
+# 博主同时发「基金圈观点精选」和「金友圈博主观点精选」，只取标题含此关键字的最新一条
+DEFAULT_TITLE_KEYWORD = "金友圈"
+# 扫描 feed 前 N 条寻找关键字匹配的帖子
+MAX_FEED_SCAN = 20
+
 # 匹配 "YYYY-MM-DD HH:MM"（允许后缀如城市名）
 _DATETIME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}")
 
@@ -108,6 +114,10 @@ def _normalize_text(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _title_matches(text: str, keyword: Optional[str]) -> bool:
+    return not keyword or keyword in text
+
+
 def _score_post_candidate(
     text: str,
     *,
@@ -127,6 +137,8 @@ def _score_post_candidate(
         score += 3
     if "金友圈" in text:
         score += 3
+    if "基金圈" in text:
+        score -= 8
     if "观点精选" in text or "资讯总分析" in text or "资讯汇总分析" in text:
         score += 5
     if "评论" in text:
@@ -167,24 +179,30 @@ def _find_latest_post_locator(
     *,
     legacy_selector: str,
     element_timeout_ms: int,
+    title_keyword: Optional[str] = DEFAULT_TITLE_KEYWORD,
 ) -> tuple[Any, str, Optional[str], Optional[Dict[str, Any]], Optional[str]]:
     """
     返回 (locator, title_text, data_id, qidian_ext, clstag)。
 
-    先尝试旧选择器；失败后回退到埋点属性扫描，避免页面改版时完全失效。
+    先用标题选择器按 feed 顺序找第一条标题含 title_keyword 的帖子；
+    失败后回退到埋点属性扫描，避免页面改版时完全失效。
     """
     try:
-        legacy_locator = page.locator(legacy_selector).first
-        legacy_locator.wait_for(state="visible", timeout=3_000)
-        title_text = _normalize_text(legacy_locator.inner_text(timeout=3_000))
-        qidian_raw = legacy_locator.get_attribute("data-qidian-ext")
-        return (
-            legacy_locator,
-            title_text,
-            legacy_locator.get_attribute("data-id"),
-            _parse_qidian_ext(qidian_raw),
-            legacy_locator.get_attribute("clstag"),
-        )
+        legacy_all = page.locator(legacy_selector)
+        legacy_all.first.wait_for(state="visible", timeout=3_000)
+        for idx in range(min(legacy_all.count(), MAX_FEED_SCAN)):
+            legacy_locator = legacy_all.nth(idx)
+            title_text = _normalize_text(legacy_locator.inner_text(timeout=3_000))
+            if not _title_matches(title_text, title_keyword):
+                continue
+            qidian_raw = legacy_locator.get_attribute("data-qidian-ext")
+            return (
+                legacy_locator,
+                title_text,
+                legacy_locator.get_attribute("data-id"),
+                _parse_qidian_ext(qidian_raw),
+                legacy_locator.get_attribute("clstag"),
+            )
     except Exception:
         pass
 
@@ -203,7 +221,7 @@ def _find_latest_post_locator(
                 if not candidate.is_visible(timeout=800):
                     continue
                 text = _normalize_text(candidate.inner_text(timeout=1_500))
-                if not text:
+                if not text or not _title_matches(text, title_keyword):
                     continue
                 qidian_raw = candidate.get_attribute("data-qidian-ext")
                 qidian_ext = _parse_qidian_ext(qidian_raw)
@@ -225,7 +243,8 @@ def _find_latest_post_locator(
 
     if best_candidate is None:
         raise PlaywrightTimeoutError(
-            "未能定位最新动态节点：旧选择器失效，且在埋点属性扫描中未找到可见帖子候选。"
+            f"未能定位最新动态节点：feed 前 {MAX_FEED_SCAN} 条中没有标题含「{title_keyword}」的可见帖子，"
+            "或选择器已因页面改版失效。"
         )
 
     locator, text, data_id, qidian_ext, clstag, _score = best_candidate
@@ -272,13 +291,15 @@ def _fetch_detail_published_time(
     try:
         if post_wait_ms > 0:
             page.wait_for_timeout(post_wait_ms)
-        time_locator = page.locator(detail_time_selector).first
-        time_locator.wait_for(state="visible", timeout=element_timeout_ms)
-        raw = time_locator.inner_text(timeout=element_timeout_ms).strip()
-        published_at = _parse_published_time(raw)
-        if published_at is None:
-            return None, None
-        return published_at, raw
+        # 该选择器同时命中作者名、关注按钮、时间、阅读量等多个 <p>，逐个找出含日期时间的那个
+        time_locators = page.locator(detail_time_selector)
+        time_locators.first.wait_for(state="visible", timeout=element_timeout_ms)
+        for idx in range(time_locators.count()):
+            raw = time_locators.nth(idx).inner_text(timeout=element_timeout_ms).strip()
+            published_at = _parse_published_time(raw)
+            if published_at is not None:
+                return published_at, raw
+        return None, None
     except Exception:
         # 详情页时间抓取失败不阻断主流程，静默降级
         return None, None
@@ -295,6 +316,7 @@ def fetch_latest_post(
     element_timeout_ms: int = 30_000,
     extra_wait_ms: int = 2_000,
     detail_wait_ms: int = 2_000,
+    title_keyword: Optional[str] = DEFAULT_TITLE_KEYWORD,
 ) -> LatestPostInfo:
     fetched_at = utc_now_iso()
     if sync_playwright is None:
@@ -347,6 +369,7 @@ def fetch_latest_post(
                 page,
                 legacy_selector=title_selector,
                 element_timeout_ms=element_timeout_ms,
+                title_keyword=title_keyword,
             )
 
             content_id: Optional[str] = None
@@ -438,6 +461,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="覆盖详情页时间元素选择器（高级排障）",
     )
     parser.add_argument(
+        "--keyword",
+        default=DEFAULT_TITLE_KEYWORD,
+        help="只取标题含该关键字的最新一条（默认「金友圈」；传空字符串则取 feed 第一条）",
+    )
+    parser.add_argument(
         "--storage-state",
         default=None,
         metavar="PATH",
@@ -453,6 +481,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         storage_state_path=args.storage_state,
         extra_wait_ms=max(0, int(args.wait_ms)),
         detail_wait_ms=max(0, int(args.detail_wait_ms)),
+        title_keyword=args.keyword or None,
     )
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result.status == "ok" else 1
