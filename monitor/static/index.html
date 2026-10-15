@@ -678,13 +678,16 @@ function renderMarket(d) {
     el("div", { class: "sub", style: "padding-left:86px" }, e.released ? `实际 ${e.actual} · 预期 ${e.forecast ?? "—"} · 前值 ${e.previous ?? "—"}` : `预期 ${e.forecast ?? "—"} · 前值 ${e.previous ?? "—"}`)))) : el("div", { class: "empty" }, "暂无日程数据（监控程序每 30 分钟更新）"));
   const flashes = d.jin10 || [];
   const flashCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "金十快讯 · 与金价相关"),
-    el("span", { class: "sub" }, "标「重要」的为金十标红快讯，交易时段内会触发 AI 分析")),
+    el("span", { class: "sub" }, "重要快讯经规则 + AI 初筛后才触发完整分析（每天最多 4 次）")),
     flashes.length ? el("ul", { class: "list" }, flashes.map((x) => el("li", {},
       el("div", { class: "row", style: "align-items:flex-start" },
         el("span", { class: "sub", style: "width:44px;flex:none;padding-top:1px" }, (x.time_bj || "").slice(11, 16)),
         el("span", { class: "grow", style: "font-size:14px" },
           x.important ? el("span", { class: "tag", style: "border-color:var(--critical);color:var(--critical);margin-right:6px" }, "重要") : null, x.text)),
-      el("div", { class: "sub", style: "padding-left:54px" }, (x.time_bj || "").slice(5, 10))))) : el("div", { class: "empty" }, "暂无相关快讯（每 2 分钟更新）"));
+      el("div", { class: "sub", style: "padding-left:54px" }, (x.time_bj || "").slice(5, 10),
+        (d.jin10_triage || {})[x.id] ? (() => { const t = d.jin10_triage[x.id];
+          return el("span", { style: `margin-left:8px;color:${t.decision === "trigger" ? "var(--brand)" : "var(--text-3)"}` },
+            t.decision === "trigger" ? `· 已触发 AI（${t.reason}）` : `· 未触发：${t.reason}`); })() : null)))) : el("div", { class: "empty" }, "暂无相关快讯（每 2 分钟更新）"));
   panel.appendChild(planCard);
   panel.appendChild(flashCard);
   panel.appendChild(macroCard);

@@ -58,6 +58,7 @@ class Monitor:
         self._macro_at = None
         self._jin10_at = None
         self._jin10_seen: set = set()
+        self._jin10_pending: List[Dict] = []
         self._ai_results: "queue.Queue[Dict[str, str]]" = queue.Queue()
         self.analysts: Dict[str, "AIAnalyst"] = {}
         from .ai import AIAnalyst, detect_analysts
@@ -120,6 +121,10 @@ class Monitor:
             events.append(self._ai_results.get_nowait())
         if self.ai_running():
             return events
+        if self._jin10_pending and not force:
+            self.start_jin10_triage(snap)
+            if self.ai_running():
+                return events
         due = {name: ("手动" if force else a.due()) for name, a in self.analysts.items()}
         due = {name: trigger for name, trigger in due.items() if trigger}
         if not due:
@@ -130,6 +135,57 @@ class Monitor:
                                            name="ai-analysis", daemon=True)
         self._ai_thread.start()
         return events
+
+    # ── 金十快讯初筛 ─────────────────────────────────────────────────────
+    def record_triage(self, store: Store, items: List[Dict], decision: str, reason: str, impact: str = "") -> None:
+        log_map = store.get_state("jin10_triage", {})
+        for x in items:
+            log_map[x["id"]] = {"decision": decision, "reason": reason, "impact": impact, "at": utc_now().isoformat(timespec="seconds")}
+        store.set_state("jin10_triage", dict(sorted(log_map.items(), key=lambda kv: kv[1]["at"])[-300:]))
+
+    def start_jin10_triage(self, snap) -> None:
+        """主线程：先做免费检查（每日上限、距上次分析间隔），通过后在后台跑低成本初筛。"""
+        pending, self._jin10_pending = self._jin10_pending, []
+        today = datetime.now(BJ).strftime("%Y-%m-%d")
+        if self.store.get_state("jin10_ai_triggers", {}).get(today, 0) >= self.settings.jin10_ai_daily_cap:
+            self.record_triage(self.store, pending, "skip", f"今日快讯触发已达上限 {self.settings.jin10_ai_daily_cap} 次")
+            return
+        gap = self.settings.jin10_ai_gap_minutes
+        if any(a.latest(gap / 60) for a in self.analysts.values()):
+            self.record_triage(self.store, pending, "skip", f"距上次分析不足 {gap:g} 分钟，已有判断覆盖")
+            return
+        judge = self.analysts.get(self.settings.ai_strategy_source) or next(iter(self.analysts.values()))
+        last_view = judge.latest(24)
+        known = self.known_flashes_before(last_view["_ts"]) if last_view else []
+        self._ai_thread = threading.Thread(target=self._triage_worker, args=(judge, pending, last_view, snap.get("xauusd"), known),
+                                           name="jin10-triage", daemon=True)
+        self._ai_thread.start()
+
+    def known_flashes_before(self, ts_utc: str, limit: int = 40) -> List[Dict]:
+        """上次分析时已提供给 AI 的重要快讯（分析时间之前 24 小时内的标红快讯）。"""
+        at_bj = datetime.fromisoformat(ts_utc).astimezone(BJ)
+        hi, lo = at_bj.strftime("%Y-%m-%d %H:%M:%S"), (at_bj - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        return [x for x in self.store.get_state("jin10_flash", []) if x["important"] and lo <= x["time_bj"] <= hi][:limit]
+
+    def _triage_worker(self, judge, pending: List[Dict], last_view, price, known=None) -> None:
+        store = Store(self.settings.db_path)
+        try:
+            try:
+                result = judge.triage(pending, last_view, price, known)
+            except Exception as exc:
+                log.warning("金十初筛失败，按规则触发: %s", exc)
+                result = {"trigger": True, "impact": "medium", "reason": "初筛失败，按规则触发"}
+            log.info("金十初筛（%s）：%s｜%s｜%s", judge.display_name, "触发" if result["trigger"] else "不触发",
+                     result["impact"], result["reason"])
+            self.record_triage(store, pending, "trigger" if result["trigger"] else "skip", result["reason"], result["impact"])
+            if result["trigger"]:
+                today = datetime.now(BJ).strftime("%Y-%m-%d")
+                caps = store.get_state("jin10_ai_triggers", {})
+                store.set_state("jin10_ai_triggers", {today: caps.get(today, 0) + 1})
+                for analyst in self.analysts.values():
+                    analyst.request_refresh(f"金十快讯：{pending[0]['text'][:30]}", min_gap_minutes=self.settings.jin10_ai_gap_minutes)
+        finally:
+            store.conn.close()
 
     def _ai_worker(self, snap, base_plan, due: Dict[str, str], jin10_recent=None) -> None:
         """同一份上下文交给各分析师并发判断（同一 run_id），全部完成后合并成一条推送。"""
@@ -240,21 +296,12 @@ class Monitor:
         if len(related) > 20:
             log.info("金十快讯补抓：新增相关快讯 %d 条", len(related))
 
+        # 触发候选：金十标红 + 严格规则 + 10 分钟内；交给 run_ai_if_due 做初筛
         now_bj = datetime.now(BJ)
-        fresh = [x for x in related if x["important"]
+        fresh = [x for x in related if jin10_flash.is_trigger_candidate(x)
                  and now_bj - datetime.strptime(x["time_bj"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=BJ) <= timedelta(minutes=10)]
-        if not (fresh and market_open and self.analysts):
-            return
-        caps = self.store.get_state("jin10_ai_triggers", {})
-        today = now_bj.strftime("%Y-%m-%d")
-        if caps.get(today, 0) >= self.settings.jin10_ai_daily_cap:
-            log.info("金十重要快讯，但今日快讯触发已达上限 %d 次：%s", self.settings.jin10_ai_daily_cap, fresh[0]["text"][:40])
-            return
-        reason = f"金十快讯：{fresh[0]['text'][:30]}"
-        for analyst in self.analysts.values():
-            analyst.request_refresh(reason, min_gap_minutes=self.settings.jin10_ai_gap_minutes)
-        self.store.set_state("jin10_ai_triggers", {today: caps.get(today, 0) + 1})
-        log.info("金十重要快讯触发 AI：%s", fresh[0]["text"][:60])
+        if fresh and market_open and self.analysts:
+            self._jin10_pending.extend(fresh)
 
     def refresh_macro_if_due(self) -> None:
         """网页宏观面板：美元指数/美债/离岸人民币 + 经济日历，每 30 分钟取一次（约 2 秒，无需浏览器）。"""

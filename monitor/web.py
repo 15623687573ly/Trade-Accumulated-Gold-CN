@@ -219,6 +219,7 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
             "scorecard": evaluate_scorecard(conn),
             "macro": get_state(conn, "web_macro"),
             "jin10": (get_state(conn, "jin10_flash") or [])[:30],
+            "jin10_triage": get_state(conn, "jin10_triage") or {},
             "fills": [{k: r[k] for k in ("strategy", "ts", "side", "grams", "price", "fee", "reason")} for r in fills],
             "alerts": [{"ts": r["ts"], "title": r["title"], "delivered": bool(r["delivered"])} for r in alerts],
             "strategy_names": {k: cls.name for k, cls in REGISTRY.items()},

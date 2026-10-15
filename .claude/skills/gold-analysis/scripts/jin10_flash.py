@@ -81,6 +81,29 @@ def fetch_since(since_bj: Optional[str], hours_back: float = 24, max_pages: int 
     return sorted(out.values(), key=lambda x: x["time_bj"], reverse=True)
 
 
+# 触发 AI 的门槛（比「相关」更严）：排除评论/软文/预告/汇总；宏观词须与美国/美联储同现；中东须有军事动作
+OPINION_RE = re.compile(r"点击查看|专属文章|特约|点评|报告|今日重点|盯盘|解读|前瞻|复盘|一文|专家|分析师认为|基金经理|"
+                        r"策略师|机构观点|展望|为何|如何|？|\?|\.{3,}|…|将于\S{0,8}后|整理|跟踪")
+US_RE = re.compile(r"美国|美联储|联储|FOMC|鲍威尔|沃什|Warsh|特朗普|白宫")
+US_MACRO_RE = re.compile(r"利率决议|加息|降息|非农|CPI|PCE|通胀|就业")
+GOLD_RE = re.compile(r"金价|现货黄金|黄金期货|央行购金|黄金储备|增持黄金")
+FED_RE = re.compile(r"美联储|FOMC|鲍威尔|沃什|Warsh")
+ME_RE = re.compile(r"伊朗|以色列|霍尔木兹|中东|沙特|胡塞|也门|红海|黎巴嫩|加沙")
+ACTION_RE = re.compile(r"袭击|空袭|导弹|战争|开火|封锁|关闭|击沉|打击|入侵|报复|停火|军事行动")
+NUKE_RE = re.compile(r"核武|核打击|核弹")
+
+
+def is_trigger_candidate(item: Dict[str, Any]) -> bool:
+    """金十标红 + 严格规则通过，才进入 AI 初筛（初筛再判断是否真跑完整分析）。"""
+    if not item.get("important"):
+        return False
+    text = LEAD_RE.sub("", item["text"])
+    if OPINION_RE.search(text) or EXCLUDE_RE.search(text):
+        return False
+    return bool(GOLD_RE.search(text) or FED_RE.search(text) or (US_RE.search(text) and US_MACRO_RE.search(text))
+                or (ME_RE.search(text) and ACTION_RE.search(text)) or NUKE_RE.search(text))
+
+
 def is_gold_related(item: Dict[str, Any]) -> bool:
     text = LEAD_RE.sub("", item["text"])
     if EXCLUDE_RE.search(text):
