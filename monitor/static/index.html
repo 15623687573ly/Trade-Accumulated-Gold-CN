@@ -560,6 +560,11 @@ function viewBlock(v) {
     el("div", { class: "mini-stat" }, el("div", { class: "l" }, "短期 1-3 日"), el("div", { class: "v bias" }, BIAS[v.bias_short])),
     el("div", { class: "mini-stat" }, el("div", { class: "l" }, "中长期 1-3 月"), el("div", { class: "v bias" }, BIAS[v.bias_long])),
     el("div", { class: "mini-stat" }, el("div", { class: "l" }, "置信"), el("div", { class: "v" }, CONF[v.confidence] || v.confidence))));
+  if (v.p_up_3d !== undefined) {
+    const pc = (x) => Math.round(x * 100) + "%";
+    box.appendChild(el("div", { class: "sub", style: "margin-top:8px" },
+      `3 日 涨>0.4% ${pc(v.p_up_3d)} · 跌>0.4% ${pc(v.p_down_3d)}　｜　3 个月 涨>4% ${pc(v.p_up_3m)} · 跌>4% ${pc(v.p_down_3m)}`));
+  }
   box.appendChild(el("p", { style: "margin:12px 0 0;font-size:14px" }, v.summary));
   if (v.hard_risk_event) box.appendChild(el("div", { class: "notice warn", style: "margin-top:10px" }, "⚠️ " + v.hard_risk_note));
   if (v.drivers && v.drivers.length) box.appendChild(el("details", { class: "more" }, el("summary", {}, `驱动因素 ${v.drivers.length}`),
@@ -608,9 +613,11 @@ function scorecardCard(d) {
     sc.analysts.forEach((a) => {
       const h = a.horizons[idx];
       const status = h.done ? `${h.done} 次${h.baseline_n ? ` · 基准 ${rate(h.baseline_hit_rate)}` : ""}` : [h.pending ? `待到期 ${h.pending}` : "", h.no_data ? `缺数据 ${h.no_data}` : ""].filter(Boolean).join(" · ") || "无数据";
+      const brier = h.brier_n ? ` · 概率准确度 ${h.brier.toFixed(2)}（基准 ${h.brier_base.toFixed(2)}，越低越准）` : "";
       sec.appendChild(el("div", { class: "hz-row" }, el("span", {}, a.name),
         el("div", { class: "bar", title: "命中率" }, h.done ? el("i", { style: `width:${Math.round(h.hit_rate * 100)}%` }) : null, el("span", { class: "mid" })),
         el("span", { style: "text-align:right" }, el("strong", {}, h.done ? rate(h.hit_rate) : "—"), el("div", { class: "sub" }, status))));
+      if (brier) sec.appendChild(el("div", { class: "sub", style: "margin:-2px 0 0 74px" }, brier.slice(3)));
     });
     const g = (sc.agreement || [])[idx];
     if (g && sc.analysts.length >= 2) {

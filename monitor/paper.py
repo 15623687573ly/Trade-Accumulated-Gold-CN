@@ -30,6 +30,8 @@ class PaperBook:
             return []
         trade = self.store.open_trade(self.bank, self.strategy)
         if trade is not None:
+            if plan.get("force_exit"):   # AI 主导账户：AI 看跌时提前离场
+                return self._exit_now(trade, price, "AI 看跌离场")
             return self._manage(trade, price)
         return self._maybe_open(snap, plan, price)
 
@@ -38,7 +40,7 @@ class PaperBook:
         buy = plan.get("buy") if plan.get("ok") else None
         if not plan.get("ok") or plan.get("action") != "buy_on_dip" or not buy or not buy.get("valid") or "zone_cny" not in buy:
             return []
-        if plan.get("ratio_bank") != self.bank or plan["gate"] == "block":
+        if plan.get("ratio_bank") != self.bank or (plan["gate"] == "block" and not plan.get("ignore_gate")):
             return []
         low, high = buy["zone_cny"]
         if not (low <= price <= high):
@@ -49,7 +51,9 @@ class PaperBook:
             if utc_now() - closed_at < timedelta(minutes=self.settings.reentry_cooldown_minutes):
                 return []
 
-        grams = self.settings.paper_grams * (0.5 if plan["gate"] == "light" else 1.0)  # 门控矛盾时半仓
+        # 原版：门控矛盾时半仓；AI 主导：按 AI 把握大小 0.5~1.5 倍
+        grams = self.settings.paper_grams * plan.get("size_mult", 1.0) * (
+            0.5 if plan["gate"] == "light" and not plan.get("ignore_gate") else 1.0)
         self.store.insert_trade(
             bank=self.bank, strategy=self.strategy, status="open", opened_at=iso(utc_now()), entry_usd=snap["xauusd"],
             entry_cny=price, grams=grams, open_grams=grams,
@@ -67,6 +71,12 @@ class PaperBook:
         }]
 
     # ── 持仓管理 ─────────────────────────────────────────────────────────
+    def _exit_now(self, trade, price: float, reason: str) -> List[Dict[str, str]]:
+        per_gram = gc.net_sell_proceeds(price, self.settings.sell_fee_rate, self.settings.spread_cny) - trade["entry_cny"]
+        realized = trade["realized_cny"] + per_gram * trade["open_grams"]
+        self._close(trade["id"], realized, reason)
+        return [self._close_event(trade, price, realized, reason, BANK_NAMES[self.bank])]
+
     def _manage(self, trade, price: float) -> List[Dict[str, str]]:
         name = BANK_NAMES[self.bank]
         per_gram = gc.net_sell_proceeds(price, self.settings.sell_fee_rate, self.settings.spread_cny) - trade["entry_cny"]

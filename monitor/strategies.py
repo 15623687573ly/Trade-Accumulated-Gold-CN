@@ -2,13 +2,14 @@
 
 每个策略只实现 decide()：用第 i 日收盘后的信息返回订单；成交、记账、手续费由引擎统一处理。
 
-AI 增强版（requires_ai=True）在同名基础策略上叠加 AI 消息面判断，只能「收紧」或「调节力度」，
-不能推翻硬规则（趋势破位清仓、止盈照常执行）。它们无法做历史回测（没有可复现的历史新闻判断，
+AI 版（requires_ai=True）由 AI 的概率判断主导方向（建仓、加减仓、清仓、定投力度），
+规则只负责风控（止损、止盈、仓位上限）。它们无法做历史回测（没有可复现的历史新闻判断，
 且模型知道历史结果），只能靠实盘模拟盘与对应的基础策略对比，看 AI 是否真的带来增益。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from .position_strategy import (Indicators, Order, PositionParams, PositionState, compute_indicators,
@@ -22,8 +23,9 @@ class DailyStrategy:
     horizon = "长期"          # 网页展示用：长期 / 中长线
     requires_ai = False
 
-    def __init__(self, params: PositionParams):
+    def __init__(self, params: PositionParams, ai: Optional["AIConfig"] = None):
         self.params = params
+        self.ai = ai or AIConfig()
 
     def indicators(self, closes: Sequence[float]) -> Indicators:
         return compute_indicators(closes, self.params)
@@ -86,51 +88,74 @@ class TrendPosition(DailyStrategy):
         return position_decide(i, closes, ind, state, self.params)
 
 
-def ai_risk_off(view: Optional[Dict[str, Any]]) -> bool:
-    """AI 中长期看空（置信中等以上）或 24 小时内有硬事件。"""
-    if not view:
-        return False
-    return (view["bias_long"] == "bearish" and view["confidence"] in ("medium", "high")) or bool(view.get("hard_risk_event"))
+@dataclass(frozen=True)
+class AIConfig:
+    """AI 主导账户的阈值（来自 .env，见 config.Settings）。"""
+    long_buy_edge: float = 0.10
+    long_reduce_edge: float = -0.10
+    long_exit_edge: float = -0.25
+    long_stop_loss: float = 0.12
+    dca_max_mult: float = 2.5
 
 
-class SmartDCAAI(SmartDCA):
-    key, name = "dca_smart_ai", "智能定投+AI"
-    description = "智能定投的金额再乘 AI 系数：中长期看多且高置信 ×1.5；看空(中/高置信) ×0.5；有硬事件 ×0.75；从不卖出"
+def _long_edge(view: Optional[Dict[str, Any]]) -> Optional[float]:
+    from .ai import long_edge
+    return long_edge(view)
+
+
+class SmartDCAAI(MonthlyDCA):
+    key, name = "dca_smart_ai", "AI 定投"
+    description = "每月定投金额 = 基础额 × AI 系数（0~2.5 倍，由 AI 对未来 3 个月涨跌概率之差决定）；从不卖出"
     requires_ai = True
 
     def decide(self, i, days, closes, ind, state, view=None):
-        orders = super().decide(i, days, closes, ind, state)
-        if not orders or not view:
-            return orders
-        order = orders[0]
-        factor, why = 1.0, "AI 中性"
-        if view["bias_long"] == "bullish" and view["confidence"] == "high":
-            factor, why = 1.5, "AI 中长期看多(高置信)"
-        elif view["bias_long"] == "bearish" and view["confidence"] in ("medium", "high"):
-            factor, why = 0.5, f"AI 中长期看空({view['confidence']})"
-        elif view.get("hard_risk_event"):
-            factor, why = 0.75, "AI 提示 24h 内硬事件"
-        order.amount = min(order.amount * factor, state.cash)
-        order.reason = f"{order.reason}；{why} ×{factor:g}"
-        return orders
+        if state.cash < 1 or not first_trading_day_of_month(i, days, state.start_index):
+            return []
+        base = state.budget / self.months
+        edge = _long_edge(view)
+        if edge is None:
+            return [Order("buy", min(base, state.cash), "每月定投；AI 判断缺失，按 1 倍")]
+        mult = min(max(1 + 3 * edge, 0.0), self.ai.dca_max_mult)
+        if mult < 0.05:
+            return []
+        return [Order("buy", min(base * mult, state.cash), f"AI 定投：3 个月涨跌概率差 {edge:+.0%} → ×{mult:.2f}")]
 
 
 class TrendPositionAI(TrendPosition):
-    key, name = "position_ai", "中长线趋势+AI"
-    description = "中长线趋势规则不变；AI 看空(中/高置信)或有硬事件时暂停加仓；AI 高置信看空时持仓减半（间隔≥20日）"
+    key, name = "position_ai", "AI 中长线"
+    description = ("AI 主导：3 个月涨跌概率差 ≥+10% 建仓（第 1 批立即，之后回撤 7%/12% 加仓，批量随把握 0.5~1.5 倍）；"
+                   "≤−10% 减仓一半，≤−25% 清仓。风控：亏损超 12% 清仓、浮盈≥25% 且 RSI>75 止盈 1/3")
     requires_ai = True
-    ai_reduce_gap_days = 20
+    gap_days = 20
 
     def decide(self, i, days, closes, ind, state, view=None):
-        orders = super().decide(i, days, closes, ind, state)
-        if any(o.side == "sell" for o in orders):
-            return orders                         # 硬规则卖出永远优先
-        if orders and ai_risk_off(view):
-            return []                             # AI 风险偏空：本次不加仓
-        if (view and state.grams > 1e-9 and view["bias_long"] == "bearish" and view["confidence"] == "high"
-                and i - state.last_tp_index >= self.ai_reduce_gap_days):
-            return [Order("sell", state.grams / 2, f"AI 中长期高置信看空：减仓一半（{view['summary'][:40]}…）")]
-        return orders
+        p, cfg, close = self.params, self.ai, closes[i]
+        avg = state.avg_cost
+        if state.grams > 1e-9 and avg:
+            if close <= avg * (1 - cfg.long_stop_loss):          # 风控优先，与 AI 无关
+                return [Order("sell", state.grams, f"风控止损：亏损超过 {cfg.long_stop_loss:.0%}")]
+            r = ind.rsi[i]
+            if close >= avg * (1 + p.tp_gain) and r is not None and r > p.tp_rsi and i - state.last_tp_index >= p.tp_min_gap_days:
+                return [Order("sell", state.grams * p.tp_fraction, f"止盈：浮盈 {close / avg - 1:.0%}、RSI {r:.0f}")]
+        edge = _long_edge(view)
+        if edge is None:
+            return []                                              # AI 缺失：不开新仓，持仓继续受风控保护
+        if state.grams > 1e-9:
+            if edge <= cfg.long_exit_edge:
+                return [Order("sell", state.grams, f"AI 看跌清仓：3 个月涨跌概率差 {edge:+.0%}")]
+            if edge <= cfg.long_reduce_edge and i - state.last_tp_index >= self.gap_days:
+                return [Order("sell", state.grams / 2, f"AI 看跌减半：3 个月涨跌概率差 {edge:+.0%}")]
+        if edge < cfg.long_buy_edge or state.tranches_used >= p.tranches or state.cash < 1:
+            return []
+        k = state.tranches_used
+        high = ind.rolling_high[i]
+        drawdown = 1 - close / high if high else 0.0
+        if k > 0 and drawdown < p.pullbacks[k]:
+            return []
+        size = min(max(edge / 0.3, 0.5), 1.5)
+        amount = min(state.budget / p.tranches * size, state.cash)
+        why = "AI 看涨建仓" if k == 0 else f"回撤 {drawdown:.1%} 加仓"
+        return [Order("buy", amount, f"第{k + 1}批 {why}：3 个月涨跌概率差 {edge:+.0%}，×{size:.2f}", k + 1)]
 
 
 REGISTRY: Dict[str, type] = {cls.key: cls for cls in
@@ -138,5 +163,5 @@ REGISTRY: Dict[str, type] = {cls.key: cls for cls in
 BACKTESTABLE = [k for k, cls in REGISTRY.items() if not cls.requires_ai]
 
 
-def build(keys: Sequence[str], params: PositionParams) -> List[DailyStrategy]:
-    return [REGISTRY[k](params) for k in keys if k in REGISTRY]
+def build(keys: Sequence[str], params: PositionParams, ai: Optional[AIConfig] = None) -> List[DailyStrategy]:
+    return [REGISTRY[k](params, ai) for k in keys if k in REGISTRY]

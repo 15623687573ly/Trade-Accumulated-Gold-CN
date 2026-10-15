@@ -314,6 +314,23 @@ class Monitor:
         except Exception as exc:
             log.warning("宏观数据刷新失败: %s", exc)
 
+    def build_ai_led_plan(self, snap, view, cost) -> Dict:
+        """短线+AI：方向由 AI 的 3 日涨跌概率决定，规则只管止损与扣手续费后的 R:R；仓位随把握 0.5~1.5 倍。"""
+        from .ai import view_probs
+        p = view_probs(view)
+        up, down = p["p_up_3d"], p["p_down_3d"]
+        st = self.settings
+        if up >= st.ai_short_entry_p and up - down >= st.ai_short_edge:
+            direction, size = "bull", min(max(0.5 + (up - 0.4) * 5, 0.5), 1.5)   # 上涨概率 50%→1 倍，60% 及以上→1.5 倍
+        elif down >= st.ai_short_exit_p:
+            direction, size = "bear", 0.0
+        else:
+            direction, size = "neutral", 0.0
+        plan = build_plan(snap, axis_m=axis_m_from_view(view), direction=direction,
+                          ai_note=f"3 日涨 {up:.0%} / 跌 {down:.0%}", **cost)
+        plan["size_mult"] = size
+        return plan
+
     def current_view(self, max_age_hours: float):
         """策略使用的 AI 判断：按 GOLD_AI_STRATEGY_SOURCE 取 claude / codex / 两者共识。"""
         if not self.analysts:
@@ -352,8 +369,7 @@ class Monitor:
                 "ratio_bank": self.settings.paper_bank}
         base_plan = build_plan(snap, axis_m=DEFAULT_AXIS_M, **cost)
         view = self.current_view(self.settings.ai_view_max_age_hours)
-        ai_plan = (build_plan(snap, axis_m=axis_m_from_view(view), **cost)
-                   if view else None)
+        ai_plan = self.build_ai_led_plan(snap, view, cost) if view else None
         plan = ai_plan or base_plan   # 提醒、摘要、网页展示：有 AI 判断时用 AI 版
         if self.short_enabled:
             alert_events = self.alerts.check(snap, plan)

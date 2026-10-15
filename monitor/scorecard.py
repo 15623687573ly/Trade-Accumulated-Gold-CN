@@ -26,9 +26,11 @@ ANALYST_NAMES = {"claude": "Claude", "codex": "Codex"}
 
 HORIZONS = [
     {"key": "1d", "label": "1 个交易日", "field": "bias_short", "days": 1, "threshold": 0.004, "momentum_days": 5},
-    {"key": "3d", "label": "3 个交易日", "field": "bias_short", "days": 3, "threshold": 0.004, "momentum_days": 5},
+    {"key": "3d", "label": "3 个交易日", "field": "bias_short", "days": 3, "threshold": 0.004, "momentum_days": 5,
+     "probs": ("p_up_3d", "p_down_3d"), "base_probs": (0.35, 0.35)},
     {"key": "20d", "label": "20 个交易日", "field": "bias_long", "days": 20, "threshold": 0.02, "momentum_days": 20},
-    {"key": "60d", "label": "60 个交易日", "field": "bias_long", "days": 60, "threshold": 0.04, "momentum_days": 60},
+    {"key": "60d", "label": "60 个交易日", "field": "bias_long", "days": 60, "threshold": 0.04, "momentum_days": 60,
+     "probs": ("p_up_3m", "p_down_3m"), "base_probs": (0.30, 0.30)},
 ]
 
 
@@ -55,6 +57,13 @@ def spot_at_close(conn: sqlite3.Connection, close_utc: datetime) -> Optional[flo
         (close_utc.isoformat(timespec="seconds"), (close_utc - TICK_WINDOW).isoformat(timespec="seconds")),
     ).fetchone()
     return row[0] if row else None
+
+
+def brier(p_up: float, p_down: float, ret: float, threshold: float) -> float:
+    """三分类 Brier 分数（涨 / 跌 / 横盘），0 为完美，越低越准。"""
+    actual = call_from_return(ret, threshold)
+    probs = {"bullish": p_up, "bearish": p_down, "neutral": max(0.0, 1 - p_up - p_down)}
+    return sum((p - (1.0 if k == actual else 0.0)) ** 2 for k, p in probs.items())
 
 
 def _rate(hits: List[bool]) -> Optional[float]:
@@ -86,6 +95,11 @@ def _horizon_stats(rows: List[Dict[str, Any]], h: Dict[str, Any]) -> Dict[str, A
         "ai_hit_rate_vs_base": _rate([o["hit"] for o in with_base]),
         "baseline_hit_rate": _rate([o["baseline_hit"] for o in with_base]),
         "by_call": by_call, "by_confidence": by_conf,
+        "brier_n": len([o for o in done if "brier" in o]),
+        "brier": (sum(o["brier"] for o in done if "brier" in o) / len([o for o in done if "brier" in o]))
+                 if any("brier" in o for o in done) else None,
+        "brier_base": (sum(o["brier_base"] for o in done if "brier" in o) / len([o for o in done if "brier" in o]))
+                      if any("brier" in o for o in done) else None,
     }
 
 
@@ -131,6 +145,10 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
                 "status": "done", "ret": ret, "call": call, "hit": is_hit(call, ret, h["threshold"]),
                 "baseline": baseline, "baseline_hit": is_hit(baseline, ret, h["threshold"]) if baseline else None,
             }
+            if h.get("probs") and h["probs"][0] in view:   # AI 给出了概率：计算概率准确度
+                up, down = (float(view[k]) for k in h["probs"])
+                row["outcomes"][h["key"]]["brier"] = brier(up, down, ret, h["threshold"])
+                row["outcomes"][h["key"]]["brier_base"] = brier(*h["base_probs"], ret, h["threshold"])
         rows.append(row)
 
     analysts = []

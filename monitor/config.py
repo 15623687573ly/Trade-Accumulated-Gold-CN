@@ -78,6 +78,15 @@ class Settings:
     jin10_poll_seconds: float = _env_float("GOLD_JIN10_POLL_SECONDS", 120)
     jin10_ai_daily_cap: int = int(_env_float("GOLD_JIN10_AI_DAILY_CAP", 4))        # 每天最多因快讯触发 AI 的次数
     jin10_ai_gap_minutes: float = _env_float("GOLD_JIN10_AI_GAP_MINUTES", 30)      # 快讯触发与上次分析的最小间隔
+    # AI 主导（只作用于 +AI 账户）：概率阈值
+    ai_short_entry_p: float = _env_float("GOLD_AI_SHORT_ENTRY_P", 0.50)     # 短线：3 日上涨概率达到此值才做多
+    ai_short_edge: float = _env_float("GOLD_AI_SHORT_EDGE", 0.15)           # 短线：且上涨概率比下跌概率高出此值
+    ai_short_exit_p: float = _env_float("GOLD_AI_SHORT_EXIT_P", 0.50)       # 短线：3 日下跌概率达到此值则持仓离场
+    ai_long_buy_edge: float = _env_float("GOLD_AI_LONG_BUY_EDGE", 0.10)     # 中长线：3 个月涨跌概率差 ≥ 此值才建仓
+    ai_long_reduce_edge: float = _env_float("GOLD_AI_LONG_REDUCE_EDGE", -0.10)  # ≤ 此值减仓一半
+    ai_long_exit_edge: float = _env_float("GOLD_AI_LONG_EXIT_EDGE", -0.25)  # ≤ 此值清仓
+    ai_long_stop_loss: float = _env_float("GOLD_AI_LONG_STOP_LOSS", 0.12)   # 中长线+AI 风控：亏损超过 12% 清仓
+    ai_dca_max_mult: float = _env_float("GOLD_AI_DCA_MAX_MULT", 2.5)        # 定投+AI：每月金额最多为基础额的倍数
     ai_event_delay_minutes: float = _env_float("GOLD_AI_EVENT_DELAY_MINUTES", 10)  # 重要数据公布后多久触发 AI（等实际值出来）
 
 

@@ -18,7 +18,7 @@ from .config import BANK_NAMES, BJ, Settings
 from .history import History
 from .position_strategy import PositionParams, PositionState, apply_fill
 from .store import Store, iso, utc_now
-from .strategies import DailyStrategy, build
+from .strategies import AIConfig, DailyStrategy, build
 
 log = logging.getLogger("monitor.accounts")
 
@@ -51,7 +51,10 @@ class Accounts:
         self.store = store
         self.history = History(store)
         self.params = PositionParams(sell_fee_rate=settings.sell_fee_rate)
-        self.strategies: List[DailyStrategy] = build(strategy_keys, self.params)
+        ai_cfg = AIConfig(long_buy_edge=settings.ai_long_buy_edge, long_reduce_edge=settings.ai_long_reduce_edge,
+                          long_exit_edge=settings.ai_long_exit_edge, long_stop_loss=settings.ai_long_stop_loss,
+                          dca_max_mult=settings.ai_dca_max_mult)
+        self.strategies: List[DailyStrategy] = build(strategy_keys, self.params, ai_cfg)
         self.bank = settings.paper_bank
         self._history_failed_at: Optional[datetime] = None
         store.conn.executescript(SCHEMA)
@@ -63,6 +66,7 @@ class Accounts:
                  json.dumps(asdict(PositionState(budget=settings.account_budget, cash=settings.account_budget,
                                                  start_index=-1))), None),
             )
+            store.conn.execute("UPDATE accounts SET name=? WHERE strategy=?", (st.name, st.key))   # 策略改名时同步
         store.conn.commit()
 
     # ── 状态读写 ─────────────────────────────────────────────────────────

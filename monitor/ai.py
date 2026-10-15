@@ -66,6 +66,10 @@ class MarketView(BaseModel):
     bias_short: Literal["bullish", "bearish", "neutral"] = Field(description="未来 1-3 个交易日的消息面方向")
     bias_long: Literal["bullish", "bearish", "neutral"] = Field(description="未来 1-3 个月的宏观方向")
     confidence: Literal["low", "medium", "high"]
+    p_up_3d: float = Field(description="未来 3 个交易日内现货黄金累计上涨超过 0.4% 的概率，0~1")
+    p_down_3d: float = Field(description="未来 3 个交易日内累计下跌超过 0.4% 的概率，0~1；与 p_up_3d 之和不超过 1，余下为横盘")
+    p_up_3m: float = Field(description="未来约 3 个月（60 个交易日）累计上涨超过 4% 的概率，0~1")
+    p_down_3m: float = Field(description="未来约 3 个月累计下跌超过 4% 的概率，0~1；与 p_up_3m 之和不超过 1")
     hard_risk_event: bool = Field(description="未来 24 小时内是否有经济日历之外的突发硬风险（地缘冲突骤然升级、意外政策等）；日历内的议息/非农/CPI 由程序判定，不在此标记")
     hard_risk_note: str
     drivers: List[Driver]
@@ -90,6 +94,8 @@ STRUCTURE_SYSTEM = """你把黄金研究笔记整理成结构化判断，供程�
 - bias_short / bias_long 必须由笔记中的证据支持；证据不足或多空相当时用 neutral，并把 confidence 设为 low。
 - confidence=high 只用于多条独立、近期、同向的证据。
 - hard_risk_event 只标记经济日历之外的突发风险；日历内的硬事件程序已判定。upcoming_events 中的日历事件必须使用程序提供的北京时间。
+- 概率要校准：没有明确证据时接近基准（3 日：涨/跌各约 0.35；3 个月：涨/跌各约 0.3），证据越强越偏离；
+  不要因为谨慎就一律给基准值——这些概率会直接决定交易方向，成绩单会按实际走势检验你的概率是否准确。
 - summary 用中文，不含具体买卖价位。"""
 
 
@@ -267,6 +273,11 @@ class AIAnalyst:
             return None
 
         data = MarketView.model_validate(view.model_dump(include=set(MarketView.model_fields))).model_dump()
+        for up, down in (("p_up_3d", "p_down_3d"), ("p_up_3m", "p_down_3m")):   # 截断到 0~1，两者之和不超过 1
+            data[up], data[down] = (min(max(float(data[k]), 0.0), 1.0) for k in (up, down))
+            if data[up] + data[down] > 1:
+                total = data[up] + data[down]
+                data[up], data[down] = data[up] / total, data[down] / total
         # 硬事件：日历内由代码判定（议息/美联储主席/非农/CPI/核心PCE，24h 内未公布），AI 只补充日历外突发风险
         scheduled = (context.get("macro") or {}).get("hard_events_24h") or []
         data["hard_risk_scheduled"] = scheduled
@@ -505,6 +516,33 @@ def consensus_view(views: Dict[str, Optional[Dict[str, Any]]]) -> Optional[Dict[
     return out
 
 
+_CONF_WEIGHT = {"low": 0.08, "medium": 0.15, "high": 0.25}
+
+
+def view_probs(view: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """AI 判断的概率；早期没有概率字段的判断，按方向 + 置信度折算一个近似值。"""
+    if not view:
+        return None
+    if "p_up_3d" in view:
+        return {k: float(view[k]) for k in ("p_up_3d", "p_down_3d", "p_up_3m", "p_down_3m")}
+    out = {}
+    for field, up, down, base in (("bias_short", "p_up_3d", "p_down_3d", 0.35), ("bias_long", "p_up_3m", "p_down_3m", 0.3)):
+        w = _CONF_WEIGHT.get(view.get("confidence"), 0.08)
+        sign = {"bullish": 1, "bearish": -1}.get(view.get(field), 0)
+        out[up], out[down] = base + sign * w, base - sign * w
+    return out
+
+
+def short_edge(view) -> Optional[float]:
+    p = view_probs(view)
+    return None if p is None else p["p_up_3d"] - p["p_down_3d"]
+
+
+def long_edge(view) -> Optional[float]:
+    p = view_probs(view)
+    return None if p is None else p["p_up_3m"] - p["p_down_3m"]
+
+
 def axis_m_from_view(view: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
     if not view:
         return None
@@ -520,7 +558,10 @@ def axis_m_from_view(view: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]
 
 
 def format_view(view: Dict[str, Any]) -> str:
-    lines = [f"**短期** {_bias_cn(view['bias_short'])} ｜ **中长期** {_bias_cn(view['bias_long'])} ｜ 置信 {view['confidence']}",
+    p = view_probs(view)
+    prob = (f"\n\n3 日：涨 {p['p_up_3d']:.0%} / 跌 {p['p_down_3d']:.0%} ｜ 3 个月：涨 {p['p_up_3m']:.0%} / 跌 {p['p_down_3m']:.0%}"
+            if p and "p_up_3d" in view else "")
+    lines = [f"**短期** {_bias_cn(view['bias_short'])} ｜ **中长期** {_bias_cn(view['bias_long'])} ｜ 置信 {view['confidence']}{prob}",
              "", view["summary"]]
     if view.get("hard_risk_event"):
         lines += ["", f"⚠️ **24 小时内硬事件**：{view['hard_risk_note']}"]

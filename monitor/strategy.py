@@ -32,8 +32,11 @@ def level_candidates(snap: Dict[str, Any], extra: Optional[Dict[str, float]] = N
     return cands
 
 
-def build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: float, sell_fee_rate: float,
-               extra_levels: Optional[Dict[str, float]] = None, ratio_bank: str = "zheshang") -> Dict[str, Any]:
+def _build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: float, sell_fee_rate: float,
+               extra_levels: Optional[Dict[str, float]] = None, ratio_bank: str = "zheshang",
+               direction: Optional[str] = None, ai_note: str = "") -> Dict[str, Any]:
+    """direction 非空时为 AI 主导：bull 在 S1 低吸、bear 只减仓并提前离场、neutral 不开新仓；
+    三轴与 30m/1H 门控只作展示，规则只负责止损与扣手续费后的 R:R。"""
     price = snap["xauusd"]
     ratings = snap.get("ratings") or {}
     levels = gc.pick_levels(price, level_candidates(snap, extra_levels), count=6)
@@ -47,6 +50,8 @@ def build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: floa
     ax_l = gc.axis_l(price, pivot, r1, s1)
     ax_s = gc.axis_s(ratings.get("30m"), ratings.get("1h"), ratings.get("4h"), ratings.get("1d"))
     combined = gc.combine_axes([axis_m["axis"], ax_l["axis"], ax_s["axis"]])
+    if direction is not None:
+        combined = {"axis": {"bull": gc.BULL, "bear": gc.BEAR}.get(direction, gc.RANGE), "grade": "AI 主导", "note": ai_note}
     gate = gc.execution_gate(ratings.get("30m"), ratings.get("1h"))
 
     ratio_entry = (snap.get("ratios") or {}).get(ratio_bank)
@@ -71,7 +76,7 @@ def build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: floa
 
     # 入场点：在展示的支撑里选共振（强度≥2）的第一档；偏多从 S1 起找，震荡从 S2 起找（区间下沿）
     start = 0 if combined["axis"] == gc.BULL else min(1, len(sup) - 1)
-    buy_idx = next((i for i in range(start, len(sup)) if sup[i].strength >= 2), start)
+    buy_idx = 0 if direction == "bull" else next((i for i in range(start, len(sup)) if sup[i].strength >= 2), start)
     entry = sup[buy_idx].price
     lower = sup_all[buy_idx + 1].price if len(sup_all) > buy_idx + 1 else None
     if lower is not None and entry - lower <= entry * MAX_STOP_PCT:
@@ -115,4 +120,22 @@ def build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: floa
         plan["action"] = "buy_on_dip"
         plan["summary"] = (f"{head}：回落到 {buy['level']} {buy['zone'][0]:.0f}–{buy['zone'][1]:.0f} "
                            f"且门控不为「不入场」时低吸")
+    return plan
+
+
+def build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: float, sell_fee_rate: float,
+               extra_levels: Optional[Dict[str, float]] = None, ratio_bank: str = "zheshang",
+               direction: Optional[str] = None, ai_note: str = "") -> Dict[str, Any]:
+    plan = _build_plan(snap, axis_m=axis_m, spread_cny=spread_cny, sell_fee_rate=sell_fee_rate,
+                       extra_levels=extra_levels, ratio_bank=ratio_bank, direction=direction, ai_note=ai_note)
+    if direction is None or not plan.get("ok"):
+        return plan
+    plan.update({"ai_led": True, "ignore_gate": direction == "bull", "force_exit": direction == "bear"})
+    if direction == "neutral":
+        plan["action"] = "wait"
+        plan["summary"] = f"AI 主导：{ai_note}，把握不足，不开新仓"
+    elif direction == "bull":
+        plan["summary"] = f"AI 主导·看涨（{ai_note}）：" + plan["summary"].split("：", 1)[-1]
+    else:
+        plan["summary"] = f"AI 主导·看跌（{ai_note}）：不新开仓，持仓提前离场"
     return plan
