@@ -1,9 +1,9 @@
-"""网页看板：只读 SQLite，展示行情、计划、AI 判断与多策略模拟盘战绩。
+"""网页看板：读取 SQLite 展示行情、计划、AI 判断与模拟盘战绩，并提供模型开关。
 
   python3 -m monitor.web                    默认只监听 127.0.0.1:8080（经 SSH 隧道访问）
   GOLD_WEB_HOST=0.0.0.0 python3 -m monitor.web   对外监听，必须设置 GOLD_WEB_PASSWORD
 
-纯标准库实现，独立进程运行；网页不联网取数，全部来自监控程序写入的数据库。
+纯标准库实现，独立进程运行；网页不联网取数，全部来自监控程序写入的数据库；模型开关接口只写持久化控制状态。
 """
 
 from __future__ import annotations
@@ -26,11 +26,15 @@ from typing import Any, Dict, List, Optional
 from .config import BANK_NAMES, Settings
 from .scorecard import evaluate as evaluate_scorecard
 from .strategies import REGISTRY
+from .controls import control, set_enabled, identity, short_labels, daily_keys
+from .performance import comparison
+from urllib.parse import urlsplit
+from .execution import EXECUTION_NAME, execution_quote
 
 log = logging.getLogger("monitor.web")
 
 STATIC = Path(__file__).resolve().parent / "static"
-SERIES_ORDER = ["hold", "dca", "dca_smart", "position", "dca_smart_ai", "position_ai"]   # 颜色槽位固定跟随策略
+SERIES_ORDER = ["hold", "position", "short", "claude:position_ai", "codex:position_ai", "claude:short_ai", "codex:short_ai"]
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -51,10 +55,12 @@ def get_state(conn: sqlite3.Connection, key: str) -> Any:
 def hourly_prices(conn: sqlite3.Connection, bank: str, since: str) -> List[Dict[str, Any]]:
     """积存金估值按小时取最后一笔，用于重建各账户净值曲线。"""
     column = "zheshang_est" if bank == "zheshang" else "minsheng_est"
+    cutover = get_state(conn, "jd_execution_since")
+    price_column = f"CASE WHEN ts >= ? THEN jd_price ELSE {column} END" if cutover else column
+    params = (cutover, since, cutover) if cutover else (since,)
     rows = conn.execute(
-        f"SELECT ts, {column} p FROM ticks WHERE rowid IN (SELECT MAX(rowid) FROM ticks WHERE ts >= ? "
-        f"AND {column} IS NOT NULL GROUP BY substr(ts,1,13)) ORDER BY ts",
-        (since,),
+        f"SELECT ts, {price_column} p FROM ticks WHERE rowid IN (SELECT MAX(rowid) FROM ticks WHERE ts >= ? "
+        f"AND {price_column} IS NOT NULL GROUP BY substr(ts,1,13)) ORDER BY ts", params,
     ).fetchall()
     return [{"ts": r["ts"], "p": r["p"]} for r in rows]
 
@@ -63,12 +69,10 @@ def equity_curves(conn: sqlite3.Connection, settings: Settings) -> Dict[str, Any
     """按成交记录重建每个账户的持仓，再用每小时积存金估值算净值（按「现在全卖」扣手续费）。"""
     if not table_exists(conn, "accounts"):
         return {"series": [], "start": None}
-    accounts = conn.execute("SELECT * FROM accounts").fetchall()
+    accounts = [a for a in conn.execute("SELECT * FROM accounts") if a["strategy"] in daily_keys(settings)]
     started = [a for a in accounts if json.loads(a["state_json"]).get("start_index", -1) >= 0]
-    if not started:
-        return {"series": [], "start": None}
-    start = min(a["started_at"] for a in started)
-    prices = hourly_prices(conn, settings.paper_bank, start)
+    start = min((a["started_at"] for a in started), default=None)
+    prices = hourly_prices(conn, settings.paper_bank, start) if start else []
     fee = settings.sell_fee_rate
     series = []
     for acct in started:
@@ -89,6 +93,14 @@ def equity_curves(conn: sqlite3.Connection, settings: Settings) -> Dict[str, Any
             value = cash + grams * pt["p"] * (1 - fee)
             points.append([pt["ts"], round(value / acct["budget"] - 1, 6)])
         series.append({"key": acct["strategy"], "name": acct["name"], "points": points})
+    if table_exists(conn, "paper_equity"):
+        for key, label in short_labels(settings).items():
+            acct = conn.execute("SELECT * FROM paper_accounts WHERE strategy=?", (key,)).fetchone()
+            if acct:
+                points = [[r["ts"], round(r["value"] / acct["budget"] - 1, 6)] for r in conn.execute(
+                    "SELECT ts,value FROM paper_equity WHERE strategy=? AND rowid IN "
+                    "(SELECT MAX(rowid) FROM paper_equity WHERE strategy=? GROUP BY substr(ts,1,13)) ORDER BY ts", (key, key))]
+                series.append({"key": key, "name": label, "points": points})
     series.sort(key=lambda s: SERIES_ORDER.index(s["key"]) if s["key"] in SERIES_ORDER else 99)
     return {"series": series, "start": start}
 
@@ -99,6 +111,8 @@ def leaderboard(conn: sqlite3.Connection, settings: Settings, price: Optional[fl
     fee = settings.sell_fee_rate
     board = []
     for acct in conn.execute("SELECT * FROM accounts").fetchall():
+        if acct["strategy"] not in daily_keys(settings):
+            continue
         state = json.loads(acct["state_json"])
         started = state.get("start_index", -1) >= 0
         cls = REGISTRY.get(acct["strategy"])
@@ -106,7 +120,9 @@ def leaderboard(conn: sqlite3.Connection, settings: Settings, price: Optional[fl
         value = cash + grams * price * (1 - fee) if price else None
         values = [r["value"] for r in conn.execute(
             "SELECT value FROM account_equity WHERE strategy=? ORDER BY day", (acct["strategy"],)).fetchall()]
-        peak, mdd = 0.0, 0.0
+        if value is None:
+            value = values[-1] if values else cash if grams <= 1e-9 else None
+        peak, mdd = acct["budget"], 0.0
         for v in values + ([value] if value is not None else []):
             peak = max(peak, v)
             if peak:
@@ -114,7 +130,9 @@ def leaderboard(conn: sqlite3.Connection, settings: Settings, price: Optional[fl
         f = conn.execute("SELECT COUNT(*) c, COALESCE(SUM(fee),0) fee FROM account_fills WHERE strategy=?",
                          (acct["strategy"],)).fetchone()
         board.append({
-            "key": acct["strategy"], "name": acct["name"], "started": started,
+            "key": acct["strategy"], "name": acct["name"] + ("（旧实验）" if acct["strategy"] in ("dca_smart_ai", "position_ai") and "旧实验" not in acct["name"] else ""), "started": started,
+            "analyst": identity(acct["strategy"])[0],
+            "paused": bool(identity(acct["strategy"])[0] and not control(conn, identity(acct["strategy"])[0])["enabled"]),
             "started_at": acct["started_at"] if started else None,
             "requires_ai": bool(cls and cls.requires_ai), "description": cls.description if cls else "",
             "horizon": cls.horizon if cls else "",
@@ -130,8 +148,8 @@ def leaderboard(conn: sqlite3.Connection, settings: Settings, price: Optional[fl
 SHORT_LABELS = {"short": "短线日内", "short_ai": "短线日内+AI"}
 
 
-def short_paper(conn: sqlite3.Connection, bank: str, strategy: str, price: Optional[float], fee_rate: float) -> Dict[str, Any]:
-    rows = conn.execute("SELECT * FROM paper_trades WHERE bank=? AND strategy=? ORDER BY id DESC LIMIT 20",
+def short_paper(conn: sqlite3.Connection, bank: str, strategy: str, price: Optional[float], fee_rate: float, spread: float = 0, label: str = "") -> Dict[str, Any]:
+    rows = conn.execute("SELECT * FROM paper_trades WHERE bank=? AND strategy=? ORDER BY id DESC LIMIT 100",
                         (bank, strategy)).fetchall()
     closed = [r["realized_cny"] for r in conn.execute(
         "SELECT realized_cny FROM paper_trades WHERE bank=? AND strategy=? AND status='closed'", (bank, strategy)).fetchall()]
@@ -142,20 +160,38 @@ def short_paper(conn: sqlite3.Connection, bank: str, strategy: str, price: Optio
         (bank, strategy)).fetchone()
     open_pos = None
     if open_row:
-        unrealized = (price * (1 - fee_rate) - open_row["entry_cny"]) * open_row["open_grams"] if price else None
+        unrealized = (price * (1 - fee_rate) - spread - open_row["entry_cny"]) * open_row["open_grams"] if price else None
         open_pos = {k: open_row[k] for k in ("id", "opened_at", "entry_cny", "grams", "open_grams", "stop_cny",
                                               "t1_cny", "t2_cny", "t1_hit", "realized_cny")}
         open_pos["unrealized"] = unrealized
     first_tick = conn.execute("SELECT MIN(ts) t FROM ticks").fetchone()["t"]
+    acct = conn.execute("SELECT * FROM paper_accounts WHERE strategy=?", (strategy,)).fetchone() if table_exists(conn, "paper_accounts") else None
+    budget = acct["budget"] if acct else None
+    cash = budget + sum(closed) + (open_row["realized_cny"] - open_row["entry_cny"] * open_row["open_grams"] if open_row else 0) if acct else None
+    value = cash + (open_row["open_grams"] * (price * (1 - fee_rate) - spread) if open_row else 0) if cash is not None and price is not None else None
+    values = [r[0] for r in conn.execute("SELECT value FROM paper_equity WHERE strategy=? ORDER BY ts", (strategy,))] if table_exists(conn, "paper_equity") else []
+    if value is None:
+        value = values[-1] if values else cash if not open_row else None
+    peak, mdd = budget or 0, 0
+    for v in values + ([value] if value is not None else []):
+        peak = max(peak, v)
+        mdd = max(mdd, 1 - v / peak) if peak else 0
+    model = identity(strategy)[0]
     return {
-        "key": strategy, "label": SHORT_LABELS.get(strategy, strategy),
+        "budget": budget, "cash": cash, "value": value, "return": value / budget - 1 if value is not None and budget else None,
+        "max_drawdown": mdd, "started_at": acct["started_at"] if acct else None,
+        "analyst": model, "paused": bool(model and not control(conn, model)["enabled"]),
+        "key": strategy, "label": label or SHORT_LABELS.get(strategy, strategy),
         "trades": len(closed), "win_rate": len(wins) / len(closed) if closed else None,
         "total_pnl": round(sum(closed), 2),
         "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
         "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
         "open": open_pos, "running_since": first_tick,
         "recent": [{k: r[k] for k in ("id", "status", "opened_at", "entry_cny", "grams", "stop_cny", "t1_cny",
-                                       "t2_cny", "realized_cny", "close_reason", "closed_at")} for r in rows],
+                                       "t2_cny", "realized_cny", "close_reason", "closed_at", "plan_json")}
+                   | {"exit_cny": r["exit_cny"] if "exit_cny" in r.keys() else None,
+                      "close_decision": json.loads(r["close_decision_json"]) if "close_decision_json" in r.keys() and r["close_decision_json"] else None}
+                   for r in rows],
     }
 
 
@@ -195,32 +231,67 @@ def ai_section(conn: sqlite3.Connection, settings: Settings) -> Dict[str, Any]:
                 "analyst": ANALYST_NAMES.get(r["analyst"], r["analyst"]) if has_analyst else "Claude",
                 "bias_short": v.get("bias_short"), "bias_long": v.get("bias_long"), "confidence": v.get("confidence")}
     return {"enabled": True, "latest": analysts[0] if analysts else None, "analysts": analysts,
-            "strategy_source": settings.ai_strategy_source, "history": [brief(r) for r in history]}
+            "strategy_source": "independent", "history": [brief(r) for r in history]}
+
+
+def jd_reference(conn):
+    """只读已采集缓存，不在页面刷新时调用京东接口，也不返回原始响应。"""
+    from .jd_research import summarize
+    out = {}
+    now = datetime.now(timezone.utc)
+    for kind in ("funds", "orders"):
+        cached = get_state(conn, "jd_research:" + kind) or {}
+        try:
+            summary = summarize(kind, cached["raw"], now) if cached.get("raw") else cached.get("summary", {"status": "not_fetched"})
+            age = (now - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
+            if not 0 <= age <= 3600:
+                summary = {"status": "stale", "published_at": summary.get("published_at")}
+        except (KeyError, TypeError, ValueError, OverflowError):
+            summary = {"status": "unavailable" if cached else "not_fetched"}
+        out[kind] = {**summary, "fetched_at": cached.get("fetched_at")}
+    return out
 
 
 def dashboard(settings: Settings) -> Dict[str, Any]:
     conn = connect(settings.db_path)
     try:
         snap = get_state(conn, "web_snapshot") or {}
-        price = (snap.get("bank_est") or {}).get(settings.paper_bank)
+        quote = execution_quote(snap)
+        valuation_quote = quote or snap.get("jd_last_quote")
+        price = valuation_quote["price"] if valuation_quote else None
+        keys = daily_keys(settings)
         fills = conn.execute(
-            "SELECT * FROM account_fills ORDER BY ts DESC LIMIT 20").fetchall() if table_exists(conn, "account_fills") else []
+            f"SELECT * FROM account_fills WHERE strategy IN ({','.join('?' for _ in keys)}) ORDER BY ts DESC LIMIT 200",
+            keys).fetchall() if keys and table_exists(conn, "account_fills") else []
         alerts = conn.execute("SELECT ts, title, delivered FROM alerts ORDER BY ts DESC LIMIT 20").fetchall()
+        board = leaderboard(conn, settings, price)
+        curves = equity_curves(conn, settings)
+        shorts = [short_paper(conn, settings.paper_bank, key, price, settings.sell_fee_rate,
+                              settings.spread_cny, label) for key, label in short_labels(settings).items()]
+        controls = []
+        for name in settings.ai_analysts:
+            if name not in ("claude", "codex"):
+                continue
+            status = get_state(conn, f"ai_status:{name}") or {}
+            controls.append({"key": name, "name": name.title(), **control(conn, name), **status,
+                             "runtime": get_state(conn, f"ai_runtime:{name}") or {}})
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "bank": settings.paper_bank, "bank_name": BANK_NAMES[settings.paper_bank],
+            "bank": settings.paper_bank, "bank_name": EXECUTION_NAME,
+            "execution": {"name": EXECUTION_NAME, "quote": quote, "valuation_quote": valuation_quote,
+                          "ready": quote is not None, "since": get_state(conn, "jd_execution_since")},
             "sell_fee_rate": settings.sell_fee_rate, "snapshot": snap,
-            "leaderboard": leaderboard(conn, settings, price),
-            "equity": equity_curves(conn, settings),
-            "short": [short_paper(conn, settings.paper_bank, key, price, settings.sell_fee_rate)
-                      for key in SHORT_LABELS if key in settings.strategies],
+            "leaderboard": board, "equity": curves, "short": shorts,
+            "model_controls": controls, "comparison": comparison(conn, board, shorts, curves),
             "prices": price_history(conn),
             "ai": ai_section(conn, settings),
             "scorecard": evaluate_scorecard(conn),
             "macro": get_state(conn, "web_macro"),
+            "ai_inputs": get_state(conn, "ai_inputs"),
+            "jd_research": jd_reference(conn),
             "jin10": (get_state(conn, "jin10_flash") or [])[:30],
             "jin10_triage": get_state(conn, "jin10_triage") or {},
-            "fills": [{k: r[k] for k in ("strategy", "ts", "side", "grams", "price", "fee", "reason")} for r in fills],
+            "fills": [{k: r[k] for k in ("strategy", "ts", "side", "grams", "price", "fee", "reason")} | {"decision": json.loads(r["decision_json"]) if "decision_json" in r.keys() and r["decision_json"] else None} for r in fills],
             "alerts": [{"ts": r["ts"], "title": r["title"], "delivered": bool(r["delivered"])} for r in alerts],
             "strategy_names": {k: cls.name for k, cls in REGISTRY.items()},
             "series_order": SERIES_ORDER,
@@ -281,6 +352,47 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        ip = self.client_address[0]
+        if _locked_out(ip):
+            self._send(429, b"too many attempts", "text/plain")
+            return
+        if not self._authorized():
+            if self.headers.get("Authorization"):
+                _record_failure(ip)
+            self._send(401, b"authentication required", "text/plain",
+                       {"WWW-Authenticate": 'Basic realm="gold-monitor", charset="UTF-8"'})
+            return
+        origin = self.headers.get("Origin")
+        if (self.headers.get("X-Gold-Control") != "1" or
+                self.headers.get("Content-Type", "").split(";")[0] != "application/json" or
+                (origin and urlsplit(origin).netloc != self.headers.get("Host"))):
+            self._send(403, b"invalid request origin", "text/plain")
+            return
+        name = self.path.removeprefix("/api/models/")
+        if self.path != f"/api/models/{name}" or name not in self.settings.ai_analysts or name not in ("claude", "codex"):
+            self._send(404, b"not found", "text/plain")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 1024:
+                raise ValueError("invalid body length")
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict) or set(data) != {"enabled"} or type(data["enabled"]) is not bool:
+                raise ValueError("enabled must be boolean")
+            # Only the explicit switch endpoint opens a writable connection.
+            conn = sqlite3.connect(str(self.settings.db_path), timeout=10)
+            try:
+                result = set_enabled(conn, name, data["enabled"])
+            finally:
+                conn.close()
+            self._send(200, json.dumps(result).encode(), "application/json")
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._send(400, json.dumps({"error": str(exc)}).encode(), "application/json")
+        except Exception:
+            log.exception("model switch failed")
+            self._send(503, b'{"error":"model switch unavailable"}', "application/json")
 
     def do_GET(self):
         ip = self.client_address[0]

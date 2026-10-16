@@ -1,7 +1,7 @@
 """多策略模拟盘：每个日线策略一个独立账户，每个交易日 09:05（北京时间）后运行一次。
 
 - 决策：用截至上一个已收盘纽约交易日的日线（与回测同一份 strategies.decide）
-- 成交：按当时银行实时价（换算估值）成交；买入免费，卖出扣手续费
+- 成交：按当时京东接口直取报价成交（超过 120 秒不成交）；买入免费，卖出扣手续费
 - 每天记录一次净值，用于收益、回撤统计
 """
 
@@ -19,6 +19,8 @@ from .history import History
 from .position_strategy import PositionParams, PositionState, apply_fill
 from .store import Store, iso, utc_now
 from .strategies import AIConfig, DailyStrategy, build
+from .controls import identity, view_active, daily_keys
+from .execution import execution_quote, EXECUTION_NAME
 
 log = logging.getLogger("monitor.accounts")
 
@@ -54,11 +56,27 @@ class Accounts:
         ai_cfg = AIConfig(long_buy_edge=settings.ai_long_buy_edge, long_reduce_edge=settings.ai_long_reduce_edge,
                           long_exit_edge=settings.ai_long_exit_edge, long_stop_loss=settings.ai_long_stop_loss,
                           dca_max_mult=settings.ai_dca_max_mult)
-        self.strategies: List[DailyStrategy] = build(strategy_keys, self.params, ai_cfg)
+        expanded = []
+        for key in strategy_keys:
+            if key == "position_ai":
+                expanded.extend(f"{m}:{key}" for m in settings.ai_analysts if m in ("claude", "codex"))
+            elif key in ("hold", "position", "claude:position_ai", "codex:position_ai"):
+                expanded.append(key)
+        self.strategies: List[DailyStrategy] = build(expanded, self.params, ai_cfg)
         self.bank = settings.paper_bank
         self._history_failed_at: Optional[datetime] = None
         store.conn.executescript(SCHEMA)
+        cols = {r["name"] for r in store.conn.execute("PRAGMA table_info(account_fills)")}
+        if "decision_json" not in cols:
+            store.conn.execute("ALTER TABLE account_fills ADD COLUMN decision_json TEXT")
+        store.conn.execute("CREATE TABLE IF NOT EXISTS trade_cycles (id INTEGER PRIMARY KEY, strategy TEXT, "
+                           "opened_at TEXT, closed_at TEXT, invested REAL DEFAULT 0, proceeds REAL DEFAULT 0, pnl REAL)")
         store.conn.commit()
+        for legacy in ("position_ai",):
+            if store.conn.execute("SELECT 1 FROM accounts WHERE strategy=?", (legacy,)).fetchone():
+                old = build([legacy], self.params, ai_cfg)[0]
+                old.name += "（旧实验，仅风控）"
+                self.strategies.append(old)
         for st in self.strategies:
             store.conn.execute(
                 "INSERT OR IGNORE INTO accounts VALUES (?,?,?,?,?,?)",
@@ -87,12 +105,16 @@ class Accounts:
         if now_bj.weekday() >= 5 or (now_bj.hour, now_bj.minute) < RUN_AFTER_BJ:
             return False
         today = now_bj.date().isoformat()
-        rows = self.store.conn.execute("SELECT last_run_day FROM accounts").fetchall()
+        keys = [st.key for st in self.strategies]
+        if not keys:
+            return False
+        rows = self.store.conn.execute(f"SELECT last_run_day FROM accounts WHERE strategy IN ({','.join('?' for _ in keys)})", keys).fetchall()
         return any(r["last_run_day"] != today for r in rows)
 
-    def run_daily(self, snap: Dict[str, Any], view: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+    def run_daily(self, snap: Dict[str, Any], views: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
         now_bj = datetime.now(BJ)
-        price = (snap.get("bank_est") or {}).get(self.bank)
+        quote = execution_quote(snap)
+        price = quote["price"] if quote else None
         if not snap.get("market_open") or price is None or not self.due(now_bj):
             return []
         if self._history_failed_at and utc_now() - self._history_failed_at < timedelta(minutes=HISTORY_RETRY_MINUTES):
@@ -119,25 +141,48 @@ class Accounts:
             row = self.store.conn.execute("SELECT last_run_day FROM accounts WHERE strategy=?", (st.key,)).fetchone()
             if row["last_run_day"] == today:
                 continue
+            model, _ = identity(st.key)
+            view = (views or {}).get(model) if model else None
+            if model and not view_active(self.store.conn, model, view):
+                view = None
             state = self._load(st.key)
             if st.requires_ai and view is None and state.start_index < 0:
                 continue                         # AI 账户等第一次 AI 判断出来再开账，保证全程有 AI 参与
             if state.start_index < 0:
                 state.start_index = i            # 账户从今天开始：今天就是「首个交易日」
                 self.store.conn.execute("UPDATE accounts SET started_at=? WHERE strategy=?", (iso(utc_now()), st.key))
-            for order in st.decide(i, days, closes, st.indicators(closes), state, view if st.requires_ai else None):
+            ind = st.indicators(closes)
+            orders = st.decide(i, days, closes, ind, state, view if st.requires_ai else None)
+            if st.requires_ai and view is None:
+                # Paused/expired models only retain deterministic position risk management.
+                orders = [o for o in orders if o.side == "sell"]
+            self.store.conn.commit()
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            quote = execution_quote(snap)
+            if quote is None:
+                self.store.conn.rollback()
+                return events
+            price = quote["price"]
+            if model and not view_active(self.store.conn, model, view):
+                orders = [o for o in st.decide(i, days, closes, ind, state, None) if o.side == "sell"]
+                view = None
+            for order in orders:
                 if st.requires_ai and view is None:
-                    order.reason += "（今日 AI 判断缺失，按基础规则）"
+                    order.reason += "（模型暂停或判断过期，仅执行风控）"
                 grams_before = state.grams
                 fee = apply_fill(state, order, price, i, self.params)
                 grams = order.amount / price if order.side == "buy" else min(order.amount, grams_before)
-                self.store.conn.execute("INSERT INTO account_fills VALUES (?,?,?,?,?,?,?)",
-                                        (st.key, iso(utc_now()), order.side, grams, price, fee, order.reason))
+                self.store.conn.execute("INSERT INTO account_fills "
+                                        "(strategy,ts,side,grams,price,fee,reason,decision_json) VALUES (?,?,?,?,?,?,?,?)",
+                                        (st.key, iso(utc_now()), order.side, grams, price, fee, order.reason,
+                                         json.dumps({"version": "independent-v1", "analyst": model, "view": view,
+                                                     "execution_quote": quote}, ensure_ascii=False)))
+                self.record_cycle(st.key, order.side, grams, price, fee, grams_before, state.grams)
                 verb = "买入" if order.side == "buy" else "卖出"
                 events.append({
                     "key": f"acct:{st.key}:{today}:{order.side}",
                     "title": f"📒[{st.name}]模拟{verb} {grams:.2f}克",
-                    "body": (f"**[{st.name}] 模拟{verb}** {grams:.2f} 克 @ {price:.2f} 元/克"
+                    "body": (f"**[{st.name}] 模拟{verb}** {EXECUTION_NAME} {grams:.2f} 克 @ {price:.2f} 元/克"
                              f"{f'，手续费 {fee:.2f} 元' if fee else ''}\n\n- 原因：{order.reason}\n"
                              f"- 账户：持仓 {state.grams:.2f} 克，现金 {state.cash:,.0f} 元"),
                 })
@@ -145,6 +190,23 @@ class Accounts:
             self.record_equity(st.key, state, price, today)
         self.store.conn.commit()
         return events
+
+    def record_cycle(self, key, side, grams, price, fee, before, after):
+        conn = self.store.conn
+        cycle = conn.execute("SELECT id FROM trade_cycles WHERE strategy=? AND closed_at IS NULL ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+        if side == "buy" and before <= 1e-9:
+            cur = conn.execute("INSERT INTO trade_cycles(strategy,opened_at) VALUES(?,?)", (key, iso(utc_now())))
+            cycle_id = cur.lastrowid
+        elif cycle:
+            cycle_id = cycle["id"]
+        else:
+            return  # Legacy positions have no complete cost trail; keep them outside new statistics.
+        if side == "buy":
+            conn.execute("UPDATE trade_cycles SET invested=invested+? WHERE id=?", (grams * price, cycle_id))
+        else:
+            conn.execute("UPDATE trade_cycles SET proceeds=proceeds+? WHERE id=?", (grams * price - fee, cycle_id))
+            if after <= 1e-9:
+                conn.execute("UPDATE trade_cycles SET closed_at=?,pnl=proceeds-invested WHERE id=?", (iso(utc_now()), cycle_id))
 
     def record_equity(self, key: str, state: PositionState, price: float, day: str) -> None:
         value = state.cash + state.grams * price * (1 - self.params.sell_fee_rate)   # 按「现在全卖」计净值
@@ -156,12 +218,14 @@ class Accounts:
     def leaderboard(self, price: Optional[float]) -> List[Dict[str, Any]]:
         board = []
         for st in self.strategies:
+            if st.key not in daily_keys(self.settings):
+                continue
             acct = self.store.conn.execute("SELECT * FROM accounts WHERE strategy=?", (st.key,)).fetchone()
             state = self._load(st.key)
             values = [r["value"] for r in self.store.conn.execute(
                 "SELECT value FROM account_equity WHERE strategy=? ORDER BY day", (st.key,)).fetchall()]
             value = state.cash + state.grams * price * (1 - self.params.sell_fee_rate) if price else (values[-1] if values else state.cash)
-            peak, mdd = 0.0, 0.0
+            peak, mdd = acct["budget"], 0.0
             for v in values + [value]:
                 peak = max(peak, v)
                 mdd = max(mdd, 1 - v / peak) if peak else mdd
@@ -169,7 +233,7 @@ class Accounts:
                                             (st.key,)).fetchone()
             board.append({
                 "key": st.key, "name": st.name, "description": st.description,
-                "started_flag": state.start_index >= 0, "requires_ai": st.requires_ai,
+                "analyst": identity(st.key)[0], "started_flag": state.start_index >= 0, "requires_ai": st.requires_ai,
                 "started": acct["started_at"][:10], "budget": acct["budget"], "value": value,
                 "return": value / acct["budget"] - 1, "max_drawdown": mdd,
                 "grams": state.grams, "cash": state.cash, "avg_cost": state.avg_cost,

@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     closed_at TEXT, realized_cny REAL DEFAULT 0, plan_json TEXT, close_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS paper_accounts (
+    strategy TEXT PRIMARY KEY, budget REAL NOT NULL, started_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_equity (
+    strategy TEXT NOT NULL, ts TEXT NOT NULL, value REAL NOT NULL,
+    PRIMARY KEY(strategy, ts)
+);
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id INTEGER PRIMARY KEY, trade_id INTEGER NOT NULL, ts TEXT NOT NULL,
+    side TEXT NOT NULL, grams REAL NOT NULL, price REAL NOT NULL,
+    fee REAL NOT NULL, quote_json TEXT, reason TEXT
+);
 """
 
 
@@ -54,6 +66,12 @@ class Store:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(paper_trades)")}
         if "strategy" not in cols:   # 旧库迁移：已有短线记录归入 short
             self.conn.execute("ALTER TABLE paper_trades ADD COLUMN strategy TEXT NOT NULL DEFAULT 'short'")
+        for name, kind in (("exit_cny", "REAL"), ("close_decision_json", "TEXT")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {kind}")
+        now = iso(utc_now())
+        self.conn.execute("INSERT OR IGNORE INTO state(key,value,updated_at) VALUES(?,?,?)",
+                          ("jd_execution_since", json.dumps(now), now))
         self.conn.commit()
 
     # ── state（键值，JSON 存储） ─────────────────────────────────────────
@@ -115,17 +133,25 @@ class Store:
             "SELECT * FROM paper_trades WHERE bank=? AND strategy=? AND status='closed' ORDER BY id DESC LIMIT 1",
             (bank, strategy)).fetchone()
 
-    def insert_trade(self, **fields: Any) -> int:
+    def insert_trade(self, *, fill=None, **fields: Any) -> int:
         cols = ", ".join(fields)
         marks = ", ".join("?" for _ in fields)
         cur = self.conn.execute(f"INSERT INTO paper_trades ({cols}) VALUES ({marks})", tuple(fields.values()))
+        if fill:
+            self._insert_paper_fill(cur.lastrowid, **fill)
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def update_trade(self, trade_id: int, **fields: Any) -> None:
+    def update_trade(self, trade_id: int, *, fill=None, **fields: Any) -> None:
         sets = ", ".join(f"{k}=?" for k in fields)
         self.conn.execute(f"UPDATE paper_trades SET {sets} WHERE id=?", (*fields.values(), trade_id))
+        if fill:
+            self._insert_paper_fill(trade_id, **fill)
         self.conn.commit()
+
+    def _insert_paper_fill(self, trade_id, side, grams, price, fee, quote, reason):
+        self.conn.execute("INSERT INTO paper_fills(trade_id,ts,side,grams,price,fee,quote_json,reason) VALUES(?,?,?,?,?,?,?,?)",
+                          (trade_id, iso(utc_now()), side, grams, price, fee, json.dumps(quote, ensure_ascii=False), reason))
 
     def trade_stats(self, bank: str, strategy: str = "short") -> Dict[str, Any]:
         rows = self.conn.execute(
@@ -141,6 +167,19 @@ class Store:
             "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
             "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
         }
+
+    def paper_balance(self, bank: str, strategy: str, price: Optional[float], fee: float, spread: float) -> Dict[str, Any]:
+        acct = self.conn.execute("SELECT * FROM paper_accounts WHERE strategy=?", (strategy,)).fetchone()
+        if not acct:
+            return {}
+        pnl = self.conn.execute("SELECT COALESCE(SUM(realized_cny),0) FROM paper_trades "
+                                "WHERE bank=? AND strategy=? AND status='closed'", (bank, strategy)).fetchone()[0]
+        trade = self.open_trade(bank, strategy)
+        grams = trade["open_grams"] if trade else 0
+        cash = acct["budget"] + pnl + (trade["realized_cny"] - grams * trade["entry_cny"] if trade else 0)
+        value = cash + grams * (price * (1 - fee) - spread) if price is not None else None
+        return {"budget": acct["budget"], "cash": cash, "grams": grams, "value": value,
+                "return": value / acct["budget"] - 1 if value is not None else None, "started_at": acct["started_at"]}
 
     def all_trades(self, bank: str, strategy: str = "short") -> List[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM paper_trades WHERE bank=? AND strategy=? ORDER BY id",

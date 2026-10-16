@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import gold_calc as gc
+from .execution import execution_quote
 
 ENTRY_ZONE_BELOW_USD = 3.0     # 入场区：支撑位下方 3 美元
 ENTRY_ZONE_ABOVE_USD = 4.0     # 入场区：支撑位上方 4 美元
@@ -39,7 +40,9 @@ def _build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: flo
     三轴与 30m/1H 门控只作展示，规则只负责止损与扣手续费后的 R:R。"""
     price = snap["xauusd"]
     ratings = snap.get("ratings") or {}
-    levels = gc.pick_levels(price, level_candidates(snap, extra_levels), count=6)
+    # Include supports being tested; excluding them makes the current price unable
+    # to enter a freshly recomputed support zone.
+    levels = gc.pick_levels(price, level_candidates(snap, extra_levels), count=6, min_gap=0.01)
     res_all, sup_all = levels["resistance"], levels["support"]
     res, sup = res_all[:SHOWN_LEVELS], sup_all[:SHOWN_LEVELS]
     if not res or not sup:
@@ -54,8 +57,8 @@ def _build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: flo
         combined = {"axis": {"bull": gc.BULL, "bear": gc.BEAR}.get(direction, gc.RANGE), "grade": "AI 主导", "note": ai_note}
     gate = gc.execution_gate(ratings.get("30m"), ratings.get("1h"))
 
-    ratio_entry = (snap.get("ratios") or {}).get(ratio_bank)
-    ratio = ratio_entry["ratio"] if ratio_entry else None
+    quote = execution_quote(snap)
+    ratio = gc.conversion_ratio(quote["price"], price) if quote else None
 
     def cny(usd: float) -> Optional[float]:
         return gc.to_cny(usd, ratio) if ratio else None
@@ -66,6 +69,7 @@ def _build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: flo
         "support": [{"price": lv.price, "cny": cny(lv.price), "reasons": lv.reasons} for lv in sup],
         "axis_m": axis_m, "axis_l": ax_l, "axis_s": ax_s, "combined": combined,
         "gate": gate, "gate_text": gc.GATE_TEXT[gate], "ratio_bank": ratio_bank, "ratio": ratio,
+        "conversion_source": "jd_latest_price_api" if quote else None,
         "reduce_zone": [r1 - 3, r1 + 3], "buy": None,
     }
 
@@ -85,6 +89,9 @@ def _build_plan(snap: Dict[str, Any], *, axis_m: Dict[str, str], spread_cny: flo
         stop = entry * (1 - FALLBACK_STOP_PCT)
     min_t1 = entry + (entry - stop) * MIN_TARGET_R
     targets: List[float] = sorted(lv.price for lv in sup_all[:buy_idx] + res_all if lv.price >= min_t1)
+    if ratio:
+        targets = [target for target in targets if gc.risk_reward_long(
+            cny(entry), cny(stop), cny(target), spread=spread_cny, sell_fee_rate=sell_fee_rate) >= gc.MIN_RR]
     t1 = targets[0] if targets else None
     t2 = targets[1] if len(targets) > 1 else None
 

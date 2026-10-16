@@ -162,6 +162,13 @@ REGISTRY: Dict[str, type] = {cls.key: cls for cls in
                              (BuyAndHold, MonthlyDCA, SmartDCA, TrendPosition, SmartDCAAI, TrendPositionAI)}
 BACKTESTABLE = [k for k, cls in REGISTRY.items() if not cls.requires_ai]
 
+# Separate identities without duplicating the trading rules or changing legacy accounts.
+for _model in ("claude", "codex"):
+    for _base in (SmartDCAAI, TrendPositionAI):
+        _key = f"{_model}:{_base.key}"
+        REGISTRY[_key] = type(f"{_model}_{_base.__name__}", (_base,),
+                              {"key": _key, "name": f"{_model.title()} · {_base.name}", "analyst": _model})
+
 
 def build(keys: Sequence[str], params: PositionParams, ai: Optional[AIConfig] = None) -> List[DailyStrategy]:
     return [REGISTRY[k](params, ai) for k in keys if k in REGISTRY]

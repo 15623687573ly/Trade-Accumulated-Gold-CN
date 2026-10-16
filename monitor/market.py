@@ -1,7 +1,7 @@
 """行情快照：TradingView(价格/OHLC/多周期信号) + CNBC(交叉核验/休市判断) + JD API + 银行页面校准。
 
-每分钟的快照不启动浏览器；银行页面(Chromium)只在 calibrate_banks() 中低频运行，
-且整个监控是单进程顺序执行，天然满足「同一时间只开一个 Chromium」。
+每分钟直取京东接口积存金报价，报价与抓取时间均须在 120 秒内。
+常驻监控不启动 Chromium；calibrate_banks() 仅保留给显式调用的银行参考报价工具。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from . import config  # noqa: F401  (确保 skill scripts 已加入 sys.path)
 from .config import BANK_NAMES, Settings
 from .store import Store, iso, utc_now
+from .execution import execution_quote
 
 import gold_calc
 from fetch_bank_quotes import fetch_bank_quotes, fetch_jd_latest_price
@@ -41,6 +42,7 @@ class Market:
         self.ratios: Dict[str, Dict[str, Any]] = store.get_state("ratios", {})
         self.last_fx_at: Optional[datetime] = None
         self.last_bank_at: Optional[datetime] = None
+        self.last_jd_quote = store.get_state("jd_last_quote")
 
     # ── 低频数据 ─────────────────────────────────────────────────────────
     def refresh_fx_if_due(self) -> None:
@@ -103,10 +105,19 @@ class Market:
         cnbc = fetch_spot_gold()
         try:
             jd = fetch_jd_latest_price()
-            snap["jd_price"] = jd.get("price")
+            quote = {key: jd.get(key) for key in ("source", "url", "price", "quote_at", "fetched_at", "product_sku")}
+            snap["execution_quote"] = execution_quote({"execution_quote": quote})
+            snap["jd_price"] = quote["price"] if snap["execution_quote"] else None
+            if snap["execution_quote"]:
+                self.last_jd_quote = quote
+                self.store.set_state("jd_last_quote", quote)
+            else:
+                snap["errors"].append("京东积存金报价无效或超过 120 秒，暂停模拟成交")
         except Exception as exc:
             snap["jd_price"] = None
+            snap["execution_quote"] = None
             snap["errors"].append(f"JD API: {exc}")
+        snap["jd_last_quote"] = self.last_jd_quote
 
         if tv["status"] == "ok":
             snap.update({
@@ -133,7 +144,7 @@ class Market:
             snap["market_open"] = snap.get("xauusd") is not None  # 无法判断时按开市处理，并在 errors 中留痕
 
         snap["fx"] = self.fx
-        snap["ratios"] = self.ratios
+        snap["ratios"] = {bank: r for bank, r in self.ratios.items() if not self._ratio_expired(r)}
         xau = snap.get("xauusd")
-        snap["bank_est"] = {bank: round(xau * r["ratio"], 2) for bank, r in self.ratios.items()} if xau else {}
+        snap["bank_est"] = {bank: round(xau * r["ratio"], 2) for bank, r in snap["ratios"].items()} if xau else {}
         return snap

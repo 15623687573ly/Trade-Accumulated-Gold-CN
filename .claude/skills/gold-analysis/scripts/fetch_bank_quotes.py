@@ -92,10 +92,17 @@ def fetch_jd_latest_price() -> Dict[str, Any]:
     payload = response.json()
     datas = payload.get("resultData", {}).get("datas", {})
     price = datas.get("price")
+    quote_at = None
+    try:
+        quote_at = datetime.fromtimestamp(float(datas["time"]) / 1000, timezone.utc).isoformat()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
     return {
         "source": "jd_latest_price_api",
         "url": JD_LATEST_PRICE_URL,
         "price": float(price) if price is not None else None,
+        "quote_at": quote_at,
+        "product_sku": datas.get("productSku"),
         "raw": datas,
         "fetched_at": utc_now_iso(),
     }

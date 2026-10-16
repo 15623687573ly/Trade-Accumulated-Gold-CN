@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,7 +25,17 @@ def load_env_file(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        quote = None
+        for i, char in enumerate(value):
+            if char in ("'", '"') and (i == 0 or value[i - 1] != "\\"):
+                quote = None if quote == char else char if quote is None else quote
+            elif char == "#" and quote is None and (i == 0 or value[i - 1].isspace()):
+                value = value[:i]
+                break
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
 
 
 load_env_file(ROOT / ".env")
@@ -43,7 +53,7 @@ class Settings:
     db_path: Path = Path(os.environ.get("GOLD_MONITOR_DB", ROOT / "monitor" / "data" / "monitor.db"))
     tick_seconds: float = _env_float("GOLD_MONITOR_TICK_SECONDS", 60)
     bank_refresh_minutes: float = _env_float("GOLD_MONITOR_BANK_REFRESH_MINUTES", 20)
-    fx_refresh_minutes: float = _env_float("GOLD_MONITOR_FX_REFRESH_MINUTES", 60)
+    fx_refresh_minutes: float = _env_float("GOLD_MONITOR_FX_REFRESH_MINUTES", 15)
     stale_minutes: float = _env_float("GOLD_MONITOR_STALE_MINUTES", 10)   # 报价超过此时长未更新视为休市
     alert_cooldown_minutes: float = _env_float("GOLD_MONITOR_ALERT_COOLDOWN_MINUTES", 60)
     level_touch_usd: float = _env_float("GOLD_MONITOR_LEVEL_TOUCH_USD", 3)
@@ -53,8 +63,8 @@ class Settings:
     paper_grams: float = _env_float("GOLD_MONITOR_PAPER_GRAMS", 10)
     spread_cny: float = _env_float("GOLD_MONITOR_SPREAD_CNY", 0.0)          # 买卖价差，两家均为单一报价
     sell_fee_rate: float = _env_float("GOLD_MONITOR_SELL_FEE_RATE", 0.004)  # 卖出手续费 0.4%
-    # 同时运行的模拟盘策略：hold/dca/dca_smart/position 为日线账户，short 为原日内短线
-    strategies: tuple = tuple(s.strip() for s in os.environ.get("GOLD_MONITOR_STRATEGIES", "hold,dca,dca_smart,position,dca_smart_ai,position_ai,short,short_ai").split(",") if s.strip())
+    # 同时运行的模拟盘：hold/position 为规则日线，position_ai 按模型拆分；short 为短线基准
+    strategies: tuple = tuple(s.strip() for s in os.environ.get("GOLD_MONITOR_STRATEGIES", "hold,position,position_ai,short,short_ai").split(",") if s.strip())
     account_budget: float = _env_float("GOLD_MONITOR_ACCOUNT_BUDGET", 100_000)   # 每个日线策略账户的虚拟本金
     weekly_report_bj: tuple = (5, 10)   # 每周六 10 点推送战绩榜（周几, 小时）
     reentry_cooldown_minutes: float = _env_float("GOLD_MONITOR_REENTRY_COOLDOWN_MINUTES", 60)
@@ -72,6 +82,7 @@ class Settings:
     ai_effort: str = os.environ.get("GOLD_AI_EFFORT", "").strip()          # 留空用模型默认；low/medium/high/xhigh/max
     ai_max_budget_usd: float = _env_float("GOLD_AI_MAX_BUDGET_USD", 3)   # claude_code 单次调用上限（按官网价折算）
     ai_schedule_bj: tuple = tuple(s.strip() for s in os.environ.get("GOLD_AI_SCHEDULE", "08:40,20:45").split(",") if s.strip())
+    clawx_api_key: str = field(default=os.environ.get("CLAWX_JR_API_KEY", ""), repr=False)
     ai_max_searches: int = int(_env_float("GOLD_AI_MAX_SEARCHES", 2))
     ai_view_max_age_hours: float = _env_float("GOLD_AI_VIEW_MAX_AGE_HOURS", 13)  # 短线用的 AI 判断有效期：覆盖 08:40→20:45 的间隔
     jin10_enabled: bool = os.environ.get("GOLD_JIN10_ENABLED", "1").strip() not in ("0", "false", "")
