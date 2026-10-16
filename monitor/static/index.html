@@ -611,6 +611,7 @@ function modelControls(d) {
       } }, c.enabled ? "关闭模型" : "开启模型");
     const message = el("div", { class: "sub", role: "status" }, !c.enabled ? "已暂停，历史战绩保留" :
       c.available === false ? "后端不可用：需配置 API 或登录本机 CLI" : running ? "正在分析 · 串行运行" : queued ? "排队中 · 等待前一个模型完成" : "已开启，按调度分析；重新开启后先获取新判断");
+    if (c.enabled && c.pending_events) message.appendChild(el("div", {}, `待覆盖 ${c.pending_events} 个新事件 · 冷却期间保留，成功分析后确认`));
     grid.appendChild(el("div", {}, el("div", { class: "row" }, el("strong", { class: "grow" }, c.name),
       el("span", { class: "tag" }, c.enabled ? "已开启" : "已关闭"), button),
       (() => { const m = ((d.comparison || {}).models || []).find((x) => x.key === c.key);
@@ -682,6 +683,8 @@ function viewBlock(v) {
       `3 日 涨>0.4% ${pc(v.p_up_3d)} · 跌>0.4% ${pc(v.p_down_3d)}　｜　3 个月 涨>4% ${pc(v.p_up_3m)} · 跌>4% ${pc(v.p_down_3m)}`));
   }
   box.appendChild(el("p", { style: "margin:12px 0 0;font-size:14px" }, v.summary));
+  if (v._completed_at) box.appendChild(el("div", { class: "sub", style: "margin-top:8px" },
+    `行情快照 ${fmtTs(v._snapshot_at)} · 开始 ${fmtTs(v._started_at)} · 完成 ${fmtTs(v._completed_at)}`));
   if (v.hard_risk_event) box.appendChild(el("div", { class: "notice warn", style: "margin-top:10px" }, "⚠️ " + v.hard_risk_note));
   if (v.drivers && v.drivers.length) box.appendChild(el("details", { class: "more" }, el("summary", {}, `驱动因素 ${v.drivers.length}`),
     el("ul", { class: "list" }, v.drivers.map((x) => el("li", {}, el("strong", {}, `${x.direction} · ${x.horizon}  `), x.factor, el("div", { class: "sub" }, x.evidence))))));
@@ -767,7 +770,7 @@ function scorecardCard(d) {
     box.appendChild(sec);
   });
   box.appendChild(el("details", { class: "more" }, el("summary", {}, "计分规则"),
-    el("p", { class: "sub", style: "margin:8px 0 0" }, "命中：看多→涨幅超过阈值；看空→跌幅超过阈值；中性→涨跌在阈值内。短期阈值取卖出手续费 0.4%。条形中线为 50%。基准为「判断前 N 日涨跌」的机械动量方向，AI 跑不赢它说明方向判断没有价值。预测命中率与交易胜率分别统计，操盘结果见「操盘对比」。样本少时结论不可靠。")));
+    el("p", { class: "sub", style: "margin:8px 0 0" }, "命中：看多→涨幅超过阈值；看空→跌幅超过阈值；中性→涨跌在阈值内。短期阈值取卖出手续费 0.4%。条形中线为 50%。基准为「判断前 N 日涨跌」的机械动量方向，AI 跑不赢它说明方向判断没有价值。新判断从分析完成后首个有效行情起算，5 分钟内无有效行情记为缺数据；历史记录保留原价格口径。预测命中率与交易胜率分别统计，操盘结果见「操盘对比」。样本少时结论不可靠。")));
   const mark = (o) => !o ? "—" : o.status === "done" ? `${o.hit ? "✓" : "✗"}${pct(o.ret, 1)}` : o.status === "pending" ? "待" : "缺";
   box.appendChild(el("details", { class: "more" }, el("summary", {}, `最近判断 ${sc.recent.length} 轮`),
     el("ul", { class: "list" }, sc.recent.map((r) => el("li", {}, el("div", { class: "sub" }, fmtTs(r.ts)),

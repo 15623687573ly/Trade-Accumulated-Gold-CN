@@ -3,7 +3,7 @@
 - 短期方向（bias_short）看 1、3 个交易日后；中长期方向（bias_long）看 20、60 个交易日后
 - 命中：看多 → 涨幅 > 阈值；看空 → 跌幅 > 阈值；中性 → 涨跌在 ±阈值内
   短期阈值取卖出手续费 0.4%（方向判断只有超过交易成本才有用），20/60 日分别取 2%/4%
-- 价格口径：入场 = 判断时记录的现货价；出场 = 第 N 个纽约交易日收盘（17:00 ET）前最后一笔现货价（监控程序 ticks）
+- 新判断入场 = 分析完成后 5 分钟内首个有效监控现货价；旧判断保留记录的价格；出场 = 第 N 个纽约交易日收盘（17:00 ET）前最后一笔现货价（监控程序 ticks）
   不用期货日线做出场价：GC=F 与现货有约 0.6% 基差，已超过短期阈值
 - 动量基准：判断前最近 N 个交易日（短期 5 日、20 日周期 20 日、60 日周期 60 日）的涨跌按同一阈值给出方向；
   AI 若跑不赢它，说明方向判断没有价值
@@ -110,8 +110,9 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_views)")}
     analyst_col = "analyst" if "analyst" in cols else "'claude'"
     run_col = "run_id" if "run_id" in cols else "NULL"
+    timing_cols = ", completed_at, snapshot_at, started_at" if "completed_at" in cols else ", NULL, NULL, NULL"
     views = conn.execute(
-        f"SELECT ts, xauusd, view_json, {analyst_col}, {run_col} FROM ai_views "
+        f"SELECT ts, xauusd, view_json, {analyst_col}, {run_col}{timing_cols} FROM ai_views "
         "WHERE error IS NULL AND xauusd IS NOT NULL ORDER BY ts").fetchall()
     bars: List[Tuple[date, float]] = []
     if _table_exists(conn, "daily_bars"):
@@ -119,14 +120,30 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
     closes = [bar_close_utc(d) for d, _ in bars]
 
     rows: List[Dict[str, Any]] = []
-    for ts, entry, view_json, analyst, run_id in views:
-        t = datetime.fromisoformat(ts)
+    for ts, entry, view_json, analyst, run_id, completed_at, snapshot_at, started_at in views:
+        t = datetime.fromisoformat(completed_at or ts)
+        price_basis, entry_at = "legacy_snapshot", ts
+        if completed_at:
+            price_basis = "first_tick_after_completion"
+            tick = conn.execute(
+                "SELECT ts,xauusd FROM ticks WHERE market_open=1 AND xauusd>0 AND ts>=? AND ts<=? "
+                "ORDER BY ts,rowid LIMIT 1",
+                (completed_at, min(now, t + timedelta(minutes=5)).isoformat(timespec="seconds"))).fetchone()
+            entry, entry_at = (tick[1], tick[0]) if tick else (None, None)
+            if entry_at:
+                t = datetime.fromisoformat(entry_at)
         view = json.loads(view_json)
         j = next((i for i, c in enumerate(closes) if c > t), len(closes))   # 判断之后第一个收盘的交易日
         row = {"ts": ts, "run_id": run_id or ts, "analyst": analyst, "entry": entry,
                "bias_short": view["bias_short"], "bias_long": view["bias_long"],
-               "confidence": view["confidence"], "outcomes": {}}
+               "confidence": view["confidence"], "outcomes": {}, "price_basis": price_basis,
+               "entry_at": entry_at, "snapshot_at": snapshot_at, "started_at": started_at,
+               "completed_at": completed_at}
         for h in HORIZONS:
+            if entry is None:
+                waiting = now <= datetime.fromisoformat(completed_at) + timedelta(minutes=5)
+                row["outcomes"][h["key"]] = {"status": "pending" if waiting else "no_data"}
+                continue
             k = j + h["days"] - 1
             if k >= len(bars) or closes[k] > now:
                 row["outcomes"][h["key"]] = {"status": "pending"}
@@ -183,7 +200,7 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
     for run_id in sorted(runs, reverse=True)[:recent_limit]:
         rs = runs[run_id]
         recent.append({"ts": min(r["ts"] for r in rs.values()), "calls": {
-            name: {k: r[k] for k in ("bias_short", "bias_long", "confidence", "outcomes")} for name, r in rs.items()}})
+            name: {k: r[k] for k in ("bias_short", "bias_long", "confidence", "outcomes", "price_basis", "entry", "entry_at", "snapshot_at", "started_at", "completed_at")} for name, r in rs.items()}})
     return {"enabled": True, "views": len(rows), "runs": len(runs), "analysts": analysts,
             "agreement": agreement, "recent": recent, "evaluated_at": now.isoformat(timespec="seconds")}
 

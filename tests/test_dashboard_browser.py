@@ -104,6 +104,7 @@ class DashboardBrowserTests(unittest.TestCase):
                         page.get_by_role("tab", name="AI", exact=True).click()
                         page.get_by_text("模型已关闭；以上为历史判断，持仓仅保留风控", exact=True).wait_for()
                         page.get_by_text("共同分析数据", exact=True).wait_for()
+                        self.assertIn("行情快照", page.locator("#panel-ai").inner_text())
                         self.assertIn("快讯 18 条", page.locator("#panel-ai").inner_text())
                         self.assertIn("挂单 源数据过期", page.locator("#panel-ai").inner_text())
                         page.get_by_role("switch", name="Claude 操盘").click()

@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from .config import BJ, Settings
 from .store import Store, iso, utc_now
 from .controls import control, active
+from .ai_events import enqueue, read as read_events, acknowledge
 
 log = logging.getLogger("monitor.ai")
 
@@ -87,6 +88,8 @@ RESEARCH_SYSTEM = """你是黄金市场研究员，服务对象是中国银行�
 要求：
 - 只采用上下文提供或检索到的、带日期的信息；每条事实注明日期与来源媒体。超过 48 小时的旧闻只能作为背景，并标明「旧闻」。
 - 经济日历（含已公布的实际值/预期/前值）、美元指数、美债收益率、离岸人民币已由程序实时提供，可直接引用，不要再联网搜索这些数字或日程。
+- trigger_events 是本轮必须覆盖的触发事件，包含原文或实际值；event_coverage 是程序用于确认覆盖的事件标识，不是交易指令。
+- snapshot_at 是共同基础行情的时刻，now_bj 是准备输入的时间；不得把旧快照当作分析完成时的实时价格。
 - 上下文中的 jin10_flash_recent 是金十数据近 24 小时的实时中文快讯（important=true 为金十标红的重要快讯），覆盖数据公布、美联储官员讲话、地缘局势、央行与资金动向，是主要消息来源，引用时注明「金十快讯 时间」。
 - 优先使用已提供的数据；按本轮搜索预算补查遗漏的重要消息，重点关注突发地缘风险、政策变化、央行购金和黄金 ETF 资金变化；已覆盖的消息不要重复搜索。
 - jd_research 是京东参考统计，不是积存金成交盘口；资金事件的时间不等于当前资金流。stale/unavailable/unconfigured 表示缺失，不得推测填补。
@@ -184,6 +187,9 @@ def ensure_schema(store: Store) -> None:
         store.conn.execute("ALTER TABLE ai_views ADD COLUMN analyst TEXT NOT NULL DEFAULT 'claude'")
     if "run_id" not in cols:
         store.conn.execute("ALTER TABLE ai_views ADD COLUMN run_id TEXT")
+    for name in ("snapshot_at", "started_at", "completed_at"):
+        if name not in cols:
+            store.conn.execute(f"ALTER TABLE ai_views ADD COLUMN {name} TEXT")
     store.conn.commit()
 
 
@@ -201,29 +207,28 @@ class AIAnalyst:
         self.model_label = {"api": self.model, "claude_code": f"claude-code:{self.model}",
                             "codex": f"codex:{self.model or 'default'}"}[backend]
         self._failed_at: Optional[datetime] = None
-        self._refresh_requested: Optional[str] = None
-        self._refresh_min_gap: float = 60
         self._seen_generation = control(store.conn, analyst)["generation"]
         ensure_schema(store)
 
     # ── 调度 ─────────────────────────────────────────────────────────────
-    def request_refresh(self, reason: str, min_gap_minutes: float = 60) -> None:
-        """事件触发：距上次成功判断超过 min_gap_minutes 才真正执行。"""
-        self._refresh_requested = reason
-        self._refresh_min_gap = min_gap_minutes
+    def request_refresh(self, reason: str, min_gap_minutes: float = 60, *, event_id=None, payload=None) -> bool:
+        """新事件持久化；冷却期间等待，分析失败或关闭不会误确认覆盖。"""
+        if not active(self.store.conn, self.analyst):
+            return False
+        return enqueue(self.store.conn, self.analyst, reason, min_gap_minutes, event_id, payload)
 
     def latest(self, max_age_hours: float) -> Optional[Dict[str, Any]]:
         switch = control(self.store.conn, self.analyst)
         if not switch["enabled"]:
             return None
         row = self.store.conn.execute(
-            "SELECT rowid, ts, view_json, run_id FROM ai_views WHERE error IS NULL AND analyst=? ORDER BY ts DESC LIMIT 1",
+            "SELECT rowid, ts, view_json, run_id, snapshot_at, started_at, completed_at FROM ai_views WHERE error IS NULL AND analyst=? ORDER BY ts DESC LIMIT 1",
             (self.analyst,)).fetchone()
         if not row:
             return None
         if switch["changed_at"] and datetime.fromisoformat(row["ts"]) <= datetime.fromisoformat(switch["changed_at"]):
             return None
-        if utc_now() - datetime.fromisoformat(row["ts"]) > timedelta(hours=max_age_hours):
+        if utc_now() - datetime.fromisoformat(row["snapshot_at"] or row["ts"]) > timedelta(hours=max_age_hours):
             return None
         view = json.loads(row["view_json"])
         view["_ts"] = row["ts"]
@@ -235,7 +240,6 @@ class AIAnalyst:
     def due(self) -> Optional[str]:
         """返回触发原因；不需要运行时返回 None。"""
         if not active(self.store.conn, self.analyst):
-            self._refresh_requested = None
             return None
         switch = control(self.store.conn, self.analyst)
         if switch["generation"] != self._seen_generation:
@@ -248,10 +252,12 @@ class AIAnalyst:
         last = self.store.conn.execute("SELECT MAX(ts) t FROM ai_views WHERE error IS NULL AND analyst=?",
                                        (self.analyst,)).fetchone()["t"]
         last_dt = datetime.fromisoformat(last) if last else None
-        if self._refresh_requested:
-            if last_dt is None or utc_now() - last_dt > timedelta(minutes=self._refresh_min_gap):
-                return self._refresh_requested
-            self._refresh_requested = None   # 刚分析过，本次事件不再重复
+        pending = read_events(self.store.conn, self.analyst)["pending"]
+        if pending:
+            gap = min(e["min_gap_minutes"] for e in pending)
+            if last_dt is None or utc_now() - last_dt >= timedelta(minutes=gap):
+                return "；".join(dict.fromkeys(e["reason"] for e in pending))[:300]
+            # 不清除队列：定时分析可以合并覆盖，否则等待冷却结束。
         now_bj = datetime.now(BJ)
         if now_bj.weekday() >= 5:
             return None
@@ -277,7 +283,9 @@ class AIAnalyst:
         self._generation = control(store.conn, self.analyst)["generation"]
         if not active(store.conn, self.analyst, self._generation):
             return None
-        self._refresh_requested = None
+        started_at = utc_now().isoformat(timespec="microseconds")
+        snapshot_at = context.get("snapshot_at") or started_at
+        covered_ids = list((context.get("event_coverage") or {}).get(self.analyst, []))
         usage = {"input": 0, "output": 0, "searches": 0}
         try:
             if self.backend == "api":
@@ -293,10 +301,10 @@ class AIAnalyst:
             self._failed_at = utc_now()
             log.warning("%s 分析失败: %s", self.display_name, exc)
             store.conn.execute(
-                "INSERT INTO ai_views (ts, model, trigger, xauusd, input_tokens, output_tokens, web_searches, error, analyst, run_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO ai_views (ts, model, trigger, xauusd, input_tokens, output_tokens, web_searches, error, analyst, run_id, snapshot_at, started_at, completed_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (iso(utc_now()), self.model_label, trigger, context.get("xauusd"), usage["input"], usage["output"],
-                 usage["searches"], str(exc)[:500], self.analyst, run_id))
+                 usage["searches"], str(exc)[:500], self.analyst, run_id, snapshot_at, started_at, self._failed_at.isoformat()))
             store.conn.commit()
             return None
 
@@ -323,12 +331,16 @@ class AIAnalyst:
             store.conn.rollback()
             return None
         view_ts = utc_now().isoformat(timespec="microseconds")
+        data.update({"_snapshot_at": snapshot_at, "_started_at": started_at,
+                     "_completed_at": view_ts, "_covered_event_ids": covered_ids})
         cur = store.conn.execute(
             "INSERT INTO ai_views (ts, model, trigger, view_json, notes, sources_json, xauusd, input_tokens, "
-            "output_tokens, web_searches, error, analyst, run_id) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?)",
+            "output_tokens, web_searches, error, analyst, run_id, snapshot_at, started_at, completed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?)",
             (view_ts, self.model_label, trigger, json.dumps(data, ensure_ascii=False), notes,
              json.dumps(sources, ensure_ascii=False), price, usage["input"], usage["output"], usage["searches"],
-             self.analyst, run_id))
+             self.analyst, run_id, snapshot_at, started_at, view_ts))
+        acknowledge(store.conn, self.analyst, covered_ids)
         store.conn.commit()
         log.info("%s 分析完成（%s）：短期 %s / 中长期 %s，置信 %s，tokens in=%d out=%d，搜索 %d 次",
                  self.display_name, trigger, data["bias_short"], data["bias_long"], data["confidence"],

@@ -30,6 +30,7 @@ from .controls import control, set_enabled, identity, short_labels, daily_keys
 from .performance import comparison
 from urllib.parse import urlsplit
 from .execution import EXECUTION_NAME, execution_quote
+from .ai_events import read as read_events
 
 log = logging.getLogger("monitor.web")
 
@@ -274,7 +275,8 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
                 continue
             status = get_state(conn, f"ai_status:{name}") or {}
             controls.append({"key": name, "name": name.title(), **control(conn, name), **status,
-                             "runtime": get_state(conn, f"ai_runtime:{name}") or {}})
+                             "runtime": get_state(conn, f"ai_runtime:{name}") or {},
+                             "pending_events": len(read_events(conn, name)["pending"])})
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "bank": settings.paper_bank, "bank_name": EXECUTION_NAME,

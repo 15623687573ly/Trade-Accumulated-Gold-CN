@@ -108,6 +108,7 @@ class Monitor:
     def ai_context(self, snap, plan, jin10_recent=None) -> Dict:
         """给 AI 的上下文：行情 + 代码算出的点位 + 经济日历与宏观行情（均为程序直取，无需浏览器）。"""
         ctx = {
+            "snapshot_at": (snap.get("ts") or utc_now()).isoformat(),
             "now_bj": datetime.now(BJ).strftime("%Y-%m-%d %H:%M"), "xauusd": snap["xauusd"],
             "change_pct": snap.get("change_pct"), "day_high": snap.get("day_high"), "day_low": snap.get("day_low"),
             "signals_tradingview": snap.get("signals"),
@@ -161,12 +162,10 @@ class Monitor:
         events: List[Dict[str, str]] = []
         while not self._ai_results.empty():
             events.append(self._ai_results.get_nowait())
+        if self._jin10_pending:
+            self.start_jin10_triage(snap)
         if self.ai_running():
             return events
-        if self._jin10_pending and not force:
-            self.start_jin10_triage(snap)
-            if self.ai_running():
-                return events
         due = {name: ("手动" if force else a.due()) for name, a in self.enabled_analysts().items()}
         due = {name: trigger for name, trigger in due.items() if trigger}
         if not due:
@@ -199,9 +198,6 @@ class Monitor:
             self.record_triage(self.store, pending, "skip", f"今日快讯触发已达上限 {self.settings.jin10_ai_daily_cap} 次")
             return
         gap = self.settings.jin10_ai_gap_minutes
-        if any(a.latest(gap / 60) for a in self.enabled_analysts().values()):
-            self.record_triage(self.store, pending, "skip", f"距上次分析不足 {gap:g} 分钟，已有判断覆盖")
-            return
         enabled = self.enabled_analysts()
         if not enabled:
             return
@@ -211,7 +207,10 @@ class Monitor:
         caps = self.store.get_state("jin10_ai_triggers", {})
         self.store.set_state("jin10_ai_triggers", {today: caps.get(today, 0) + 1})
         for analyst in enabled.values():
-            analyst.request_refresh(f"金十快讯：{pending[0]['text'][:30]}", min_gap_minutes=gap)
+            for item in pending:
+                analyst.request_refresh(f"金十快讯：{item['text'][:30]}", min_gap_minutes=gap,
+                    event_id="jin10:" + item["id"], payload={"source": "金十快讯", "time_bj": item.get("time_bj"),
+                        "text": item["text"][:1000]})
 
     def _ai_worker(self, snap, base_plan, due: Dict[str, str], jin10_recent=None) -> None:
         """同一份上下文串行交给各分析师（同一 run_id），低配机器只运行一个 AI。"""
@@ -219,10 +218,23 @@ class Monitor:
         run_id = utc_now().isoformat(timespec="seconds")
         log.info("AI 消息面分析开始（%s，后台串行）", " → ".join(f"{n}:{t}" for n, t in due.items()))
         try:
-            context = self.ai_context(snap, base_plan, jin10_recent)
+            from .ai_events import read as read_events
+            coverage_store = Store(self.settings.db_path)
+            try:
+                pending = {name: read_events(coverage_store.conn, name)["pending"] for name in due}
+            finally:
+                coverage_store.conn.close()
+            context = dict(self.ai_context(snap, base_plan, jin10_recent))
+            context["event_coverage"] = {name: [e["id"] for e in events] for name, events in pending.items()}
+            shared = {e["id"]: e for events in pending.values() for e in events}
+            context["trigger_events"] = [{k: e[k] for k in ("id", "reason", "observed_at", "data")} for e in shared.values()]
             archive = Store(self.settings.db_path)
             try:
-                archive.set_state(f"ai_input:{run_id}", {"policy": "shared-direct-v1",
+                meta = archive.get_state("ai_inputs", {})
+                meta.update({"context_chars": len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))),
+                             "trigger_events": len(shared), "event_coverage": context["event_coverage"]})
+                archive.set_state("ai_inputs", meta)
+                archive.set_state(f"ai_input:{run_id}", {"policy": "shared-direct-v2",
                     "max_searches": self.settings.ai_max_searches, "context": context})
             finally:
                 archive.conn.close()
@@ -282,28 +294,35 @@ class Monitor:
         self.store.set_state("web_snapshot", json.loads(json.dumps(payload, ensure_ascii=False, default=str)))
 
     def request_ai_after_data_release(self) -> None:
-        """美国重要数据（日历重大/重要两级）公布后约 10 分钟触发一次 AI，同一时刻公布的多项合并为一次。"""
-        if not self.analysts:
+        """实际值到达后排队；同一时刻的多项结果各自去重，延迟公布可补齐。"""
+        import hashlib
+        import math
+        from .macro_cache import age_seconds
+        enabled = self.enabled_analysts()
+        if not enabled:
             return
-        calendar = (self.store.get_state("web_macro") or {}).get("calendar") or []
+        macro = self.store.get_state("web_macro") or {}
         now = utc_now()
-        delay = timedelta(minutes=self.settings.ai_event_delay_minutes)
-        done = set(self.store.get_state("ai_event_triggers", []))
-        due_times = {}
-        for e in calendar:
-            if e.get("country") != "US" or e.get("tier", 3) > 2:
+        stamp = macro.get("calendar_fetched_at", macro.get("fetched_at"))
+        if not 0 <= age_seconds(stamp, now) < 3600:
+            return
+        delay = self.settings.ai_event_delay_minutes * 60
+        for event in macro.get("calendar") or []:
+            if event.get("country") != "US" or event.get("tier", 3) > 2:
                 continue
-            at = datetime.fromisoformat(e["time_utc"])
-            if at + delay <= now <= at + delay + timedelta(minutes=50) and e["time_utc"] not in done:
-                due_times.setdefault(e["time_utc"], []).append(e)
-        for time_utc, events in sorted(due_times.items()):
-            names = "、".join(e["title"] for e in events[:3])
-            for analyst in self.enabled_analysts().values():
-                analyst.request_refresh(f"数据公布 {events[0]['time_bj']} {names}", min_gap_minutes=15)
-            done.add(time_utc)
-            log.info("重要数据已公布，触发 AI：%s %s", events[0]["time_bj"], names)
-        if due_times:
-            self.store.set_state("ai_event_triggers", sorted(done)[-50:])
+            age = age_seconds(event.get("time_utc"), now)
+            if not delay <= age <= 86400 or event.get("actual") is None or event.get("actual") == "":
+                continue
+            try:
+                if isinstance(event["actual"], bool) or not math.isfinite(float(event["actual"])):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            key = json.dumps([event["time_utc"], event["country"], event["title"]], ensure_ascii=False)
+            event_id = "calendar:" + hashlib.sha256(key.encode()).hexdigest()[:24]
+            for analyst in enabled.values():
+                analyst.request_refresh(f"数据已公布 {event['time_bj']} {event['title']}", min_gap_minutes=15,
+                    event_id=event_id, payload={**event, "released": True, "source": "经济日历"})
 
     def poll_jin10_if_due(self, market_open: bool) -> None:
         """金十快讯：每 2 分钟抓一次，存下与金价相关的条目；金十标红的重要快讯（10 分钟内）在交易时段触发 AI。"""
