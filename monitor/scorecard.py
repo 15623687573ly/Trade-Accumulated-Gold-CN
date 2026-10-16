@@ -103,7 +103,7 @@ def _horizon_stats(rows: List[Dict[str, Any]], h: Dict[str, Any]) -> Dict[str, A
     }
 
 
-def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_limit: int = 20) -> Dict[str, Any]:
+def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_limit: int = 20, view_ids: Optional[List[int]] = None) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     if not _table_exists(conn, "ai_views"):
         return {"enabled": False, "views": 0, "analysts": [], "agreement": [], "recent": []}
@@ -113,7 +113,7 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
     timing_cols = ", completed_at, snapshot_at, started_at" if "completed_at" in cols else ", NULL, NULL, NULL"
     views = conn.execute(
         f"SELECT ts, xauusd, view_json, {analyst_col}, {run_col}{timing_cols} FROM ai_views "
-        "WHERE error IS NULL AND xauusd IS NOT NULL ORDER BY ts").fetchall()
+        "WHERE error IS NULL AND xauusd IS NOT NULL" + (" AND rowid IN (" + ",".join("?" for _ in view_ids) + ")" if view_ids else "") + " ORDER BY ts", view_ids or []).fetchall()
     bars: List[Tuple[date, float]] = []
     if _table_exists(conn, "daily_bars"):
         bars = [(date.fromisoformat(r[0]), r[1]) for r in conn.execute("SELECT day, xau_close FROM daily_bars ORDER BY day")]
@@ -200,7 +200,7 @@ def evaluate(conn: sqlite3.Connection, now: Optional[datetime] = None, recent_li
     for run_id in sorted(runs, reverse=True)[:recent_limit]:
         rs = runs[run_id]
         recent.append({"ts": min(r["ts"] for r in rs.values()), "calls": {
-            name: {k: r[k] for k in ("bias_short", "bias_long", "confidence", "outcomes", "price_basis", "entry", "entry_at", "snapshot_at", "started_at", "completed_at")} for name, r in rs.items()}})
+            name: {k: r[k] for k in ("ts", "bias_short", "bias_long", "confidence", "outcomes", "price_basis", "entry", "entry_at", "snapshot_at", "started_at", "completed_at")} for name, r in rs.items()}})
     return {"enabled": True, "views": len(rows), "runs": len(runs), "analysts": analysts,
             "agreement": agreement, "recent": recent, "evaluated_at": now.isoformat(timespec="seconds")}
 

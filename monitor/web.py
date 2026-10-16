@@ -17,9 +17,11 @@ import sqlite3
 import sys
 import threading
 import time
+from contextlib import closing
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -339,6 +341,70 @@ _auth_failures: Dict[str, deque] = defaultdict(deque)
 _auth_lock = threading.Lock()
 
 
+def history_page(settings, query):
+    """Read paged history, applying model/date/account filters before pagination."""
+    kind=query.get("kind",["fills"])[0]
+    offset=max(0,int(query.get("offset",["0"])[0]))
+    limit=min(100,max(1,int(query.get("limit",["50"])[0])))
+    model=query.get("model",["all"])[0]
+    account=query.get("account",["all"])[0]
+    days=query.get("days",["all"])[0]
+    since=(datetime.now(timezone.utc)-timedelta(days=max(1,int(days)))).isoformat() if days!="all" else None
+    sources=[]
+    with closing(connect(settings.db_path)) as conn:
+        if kind=="fills":
+            if table_exists(conn,"account_fills"):
+                keys=list(daily_keys(settings))
+                if keys: sources.append(("SELECT strategy AS account,ts AS stamp,'rules' AS source,rowid AS id,* FROM account_fills WHERE strategy IN ("+','.join('?' for _ in keys)+")",keys))
+            if table_exists(conn,"paper_fills"):
+                keys=list(short_labels(settings))
+                if keys: sources.append(("SELECT t.strategy AS account,f.ts AS stamp,'short' AS source,f.*,t.plan_json FROM paper_fills f JOIN paper_trades t ON t.id=f.trade_id WHERE t.strategy IN ("+','.join('?' for _ in keys)+")",keys))
+            if portfolios_exist(conn): sources.append(("SELECT account,ts AS stamp,'ai' AS source,* FROM ai_portfolio_fills",[]))
+        elif kind=="plans":
+            if portfolios_exist(conn): sources.append(("SELECT account,created_at AS stamp,* FROM ai_plans",[]))
+        elif kind=="analysis":
+            if table_exists(conn,"ai_views"): sources.append(("SELECT analyst AS account,ts AS stamp,rowid AS id,* FROM ai_views",[]))
+        elif kind=="cycles":
+            if portfolios_exist(conn): sources.append(("SELECT account,COALESCE(closed_at,opened_at) AS stamp,* FROM ai_portfolio_cycles",[]))
+            keys=list(short_labels(settings))
+            if keys and table_exists(conn,"paper_trades"): sources.append(("SELECT strategy AS account,COALESCE(closed_at,opened_at) AS stamp,* FROM paper_trades WHERE strategy IN ("+','.join('?' for _ in keys)+")",keys))
+        elif kind=="alerts": sources.append(("SELECT '' AS account,ts AS stamp,rowid AS id,* FROM alerts",[]))
+        else: raise ValueError("unknown history kind")
+        rows=[]
+        for sql,params in sources:
+            clauses=[]
+            if model=="rules": clauses.append("account NOT LIKE '%:%'" if kind!="analysis" else "0")
+            elif model!="all":
+                clauses.append("(account=? OR account LIKE ?)");params+= [model,model+':%']
+            if account!="all": clauses.append("account=?");params.append(account)
+            if since: clauses.append("stamp>=?");params.append(since)
+            where=" WHERE "+" AND ".join(clauses) if clauses else ""
+            rows += [dict(r) for r in conn.execute("SELECT * FROM ("+sql+")"+where+" ORDER BY stamp DESC,id DESC,account DESC LIMIT ?",params+[offset+limit+1])]
+        rows.sort(key=lambda r:(r["stamp"],r.get("id",0),r["account"]),reverse=True)
+        page=rows[offset:offset+limit]
+        outcomes={}
+        if kind=="analysis" and page:
+            score=evaluate_scorecard(conn,recent_limit=len(page),view_ids=[r["id"] for r in page])
+            for run in score["recent"]:
+                for name,call in run["calls"].items(): outcomes[(name,call.get("completed_at") or call["ts"])]=call["outcomes"]
+        for r in page:
+            if kind=="plans": r["decision"]=json.loads(r["decision_json"])
+            if kind=="fills":
+                r["strategy"]=r["account"]
+                r["decision"]=json.loads(r["decision_json"]) if r.get("decision_json") else None
+                if r.get("plan_json"):
+                    plan=json.loads(r["plan_json"])
+                    r["decision"]={"analyst":identity(r["account"])[0],"version":plan.get("version"),"view":plan.get("decision"),"execution_quote":json.loads(r["quote_json"]) if r.get("quote_json") else plan.get("execution_quote")}
+                if r.get("view_id"):
+                    v=conn.execute("SELECT view_json,run_id FROM ai_views WHERE rowid=?",(r["view_id"],)).fetchone()
+                    view=json.loads(v["view_json"]) if v and v["view_json"] else {}
+                    r["decision"]={"analyst":r["account"].split(':')[0],"version":"autonomous-six-v1","view":{"summary":r["reason"],"_view_id":r["view_id"],"_run_id":v["run_id"] if v else None},"order":(view.get("account_decisions") or {}).get(r["account"].split(':')[1]),"execution_quote":json.loads(r["quote_json"])}
+            if kind=="analysis":
+                r["view"]=json.loads(r["view_json"]) if r.get("view_json") else {}
+                r["outcomes"]=outcomes.get((r["analyst"],r.get("completed_at") or r["ts"]))
+        return {"items":page,"offset":offset,"limit":limit,"has_more":len(rows)>offset+limit}
+
+
 def _locked_out(ip: str) -> bool:
     now = time.monotonic()
     with _auth_lock:
@@ -442,6 +508,15 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
+        elif path == "/api/history":
+            try:
+                body=json.dumps(history_page(self.settings,parse_qs(urlsplit(self.path).query)),ensure_ascii=False,default=str).encode()
+                self._send(200,body,"application/json; charset=utf-8")
+            except (ValueError,TypeError):
+                self._send(400,b'{"error":"invalid history query"}',"application/json")
+            except Exception:
+                log.exception("history failed")
+                self._send(500,b'{"error":"history unavailable"}',"application/json")
         elif path == "/api/dashboard":
             try:
                 body = json.dumps(dashboard(self.settings), ensure_ascii=False, default=str).encode()

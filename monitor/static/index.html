@@ -207,6 +207,7 @@ td.wrap, th.wrap { white-space: normal; text-align: left; }
 .market-section-note { margin:0 0 12px; font-size:12px; color:var(--text-3); }
 @media(max-width:800px) { .market-quotes,.macro-quotes { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media(max-width:450px) { .quote-tile { padding:12px; } .quote-value { font-size:22px; } .event-row { grid-template-columns:76px minmax(0,1fr); gap:8px; } }
+.record-controls { position:sticky;top:60px;z-index:5; background:var(--surface); }
 </style>
 </head>
 <body>
@@ -262,7 +263,7 @@ const EVENT_CN = {
 };
 const eventName = (t) => EVENT_CN[t] || (/^Fed Chair (.+) Speech$/.test(t) ? `美联储主席${t.replace(/^Fed Chair (.+) Speech$/, " $1 ")}讲话` : t);
 const COUNTRY_CN = { US: "美国", CN: "中国" };
-const TABS = [["overview", "总览"], ["strategies", "策略"], ["compare", "操盘对比"], ["ai", "AI"], ["market", "行情"], ["records", "操盘记录"]];
+const TABS = [["overview", "总览"], ["strategies", "账户"], ["compare", "操盘对比"], ["ai", "AI"], ["market", "行情"], ["records", "操盘记录"]];
 
 const bjFmt = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 const bjTime = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -328,6 +329,8 @@ function showTab(id, push = true) {
   if (push) history.replaceState(null, "", "#" + id);
   document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === id)));
   TABS.forEach(([tid]) => { document.getElementById(`panel-${tid}`).hidden = tid !== id; });
+  renderPage(id);
+  if(id==="records" && !historyItems.length && !historyBusy) fetchHistory();
   renderActiveCharts();
   window.scrollTo({ top: 0 });
 }
@@ -433,7 +436,8 @@ let DATA = null;
 const hiddenSeries = new Set();
 let priceRange = "1d";
 let calendarFilter = "upcoming", flashFilter = "all";
-let strategyScope = "ai";
+let strategyScope = "ai", assetModel="all", assetPeriod="all", assetStart="all";
+const assetMatches=(key)=> (assetModel==="all" || key.startsWith(assetModel+":")) && (assetPeriod==="all" || key.includes(":"+assetPeriod+"_")) && (assetStart==="all" || key.endsWith("_"+assetStart));
 let fillFilter = "all";
 let recordModel = "all", recordDays = "all";
 const plan = (d) => (d.snapshot || {}).plan;
@@ -442,100 +446,61 @@ function hardEvents(d) {
   return ((d.macro || {}).hard_events_24h || []).map((e) => `${e.time_bj} ${eventName(e.title)}`);
 }
 function aiAgreement(d) {
-  const a = (d.ai && d.ai.analysts) || [];
+  const a = ((d.ai && d.ai.analysts) || []).filter((v)=>{
+    const c=(d.model_controls || []).find((x)=>x.key===v.analyst);
+    return (!c || (c.enabled && (!c.changed_at || new Date(v.ts)>new Date(c.changed_at)))) && (d.trading_mode!=="six_account" || v.account_decisions);
+  });
   if (a.length < 2) return null;
   return { short: a[0].bias_short === a[1].bias_short, long: a[0].bias_long === a[1].bias_long };
 }
 
 /* ── 总览 ───────────────────────────────────────────────────────────── */
+function modelSummary(d) {
+  return card("模型运行与成绩", el("button",{class:"link-btn",onclick:()=>showTab("ai")},"管理模型 →"),
+    el("div",{class:"grid-2"},(d.comparison.models || []).map((m)=> {
+      const c=(d.model_controls || []).find((x)=>x.key===m.key) || {};
+      return el("div",{},el("strong",{},m.name),el("span",{class:"tag"},!c.enabled ? "已暂停" : c.available===false ? "后端不可用" : c.runtime?.running ? "分析中" : c.runtime?.queued ? "排队中" : "已开启"),
+        el("div",{class:"mini-stats"},el("div",{},"收益 ",pct(m.return)),el("div",{},"胜率 ",rate(m.win_rate)),el("div",{},"完整平仓 ",String(m.trades))),
+        el("div",{class:"sub"},m.started_at ? `起始 ${fmtTs(m.started_at)}` : "尚未开始"),el("div",{class:"sub"},`今日调用 ${c.runs_today || 0}/${c.daily_cap || "—"} 轮`));
+    })));
+}
 function renderOverview(d) {
-  const panel = clear(document.getElementById("panel-overview"));
-  panel.appendChild(modelControls(d));
-  const s = d.snapshot || {}, p = plan(d), est = s.bank_est || {};
-  const ch = s.change_pct;
-  const spark = el("div", { class: "chart", id: "spark" });
-  panel.appendChild(el("div", { class: "card" },
-    el("div", { class: "hero" },
-      el("div", {},
-        el("div", { class: "sub" }, "XAUUSD 现货 · 美元/盎司"),
-        el("div", { class: "price-big" }, num(s.xauusd)),
-        el("div", { class: "delta secondary" }, ch === null || ch === undefined ? "" : `${arrow(ch)} ${signed(ch)}% 今日`,
-          s.day_low ? el("span", { class: "muted", style: "font-weight:400" }, `  ·  ${num(s.day_low, 0)} – ${num(s.day_high, 0)}`) : null)),
-      spark),
-    el("div", { class: "mini-stats" },
-      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "京东积存金 元/克"), el("div", { class: "v" }, num(((d.execution || {}).valuation_quote || {}).price))),
-      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "京东报价时间"), el("div", { class: "v" }, fmtTs(((d.execution || {}).valuation_quote || {}).quote_at))),
-      el("div", { class: "mini-stat" }, el("div", { class: "l" }, "USD/CNY"), el("div", { class: "v" }, num((s.fx || {}).rate, 4)))),
-    el("div", { class: "sub", style: "margin-top:8px" }, (d.execution || {}).ready ? "模拟成交与估值使用京东接口直取报价" : "京东报价缺失或过期：暂停成交，估值沿用上次有效报价"),
-    s.signals ? el("div", { class: "chips", style: "margin-top:12px" }, Object.entries(s.signals).map(([k, v]) => el("span", { class: "chip" }, `${k} ${v}`))) : null));
-
-  const adv = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "规则短线参考"),
-    el("span", { class: "sub" }, "对照账户 · 纯规则")));
-  if (!p || !p.ok) {
-    adv.appendChild(el("div", { class: "empty" }, s.market_open === false ? "休市中" : "暂无计划"));
-  } else {
-    adv.appendChild(el("div", { class: "row" }, el("div", { class: "action-label" }, ACTION[p.action] || p.action), el("span", { class: "chip" }, p.gate_text)));
-    adv.appendChild(el("p", { class: "secondary", style: "margin:6px 0 0;font-size:14px" }, p.summary));
-    const b = p.buy;
-    if (b && b.t1 && b.zone_cny && p.action !== "buy_on_dip") {
-      adv.appendChild(el("div", { class: "sub", style: "margin-top:8px" },
-        `参考：${b.level} 低吸区 ${num(b.zone_cny[0], 1)}–${num(b.zone_cny[1], 1)} 元/克 · 止损 ${num(b.stop_cny, 1)} · T1 ${num(b.t1_cny, 1)} · R:R ${num(b.rr1)}（不达标，不建议入场）`));
-    } else if (b && b.t1 && b.zone_cny) {
-      adv.appendChild(el("div", { class: "action-zone" },
-        el("div", { class: "mini-stat" }, el("div", { class: "l" }, `低吸区（${b.level}）`), el("div", { class: "v" }, `${num(b.zone_cny[0], 1)}–${num(b.zone_cny[1], 1)}`)),
-        el("div", { class: "mini-stat" }, el("div", { class: "l" }, "止损"), el("div", { class: "v" }, num(b.stop_cny, 1))),
-        el("div", { class: "mini-stat" }, el("div", { class: "l" }, `T1 · R:R ${num(b.rr1)}`), el("div", { class: "v" }, num(b.t1_cny, 1)))));
-      adv.appendChild(el("div", { class: "sub", style: "margin-top:6px" }, `单位 元/克（${d.bank_name}）· 保本卖价 ${num(b.breakeven_cny)}（含 ${(d.sell_fee_rate * 100).toFixed(1)}% 卖出手续费）`));
-    }
-  }
-  const analysts = (d.ai && d.ai.analysts) || [];
-  if (analysts.length) {
-    const ag = aiAgreement(d);
-    adv.appendChild(el("div", { class: "ai-line", style: "margin-top:14px;padding-top:12px;border-top:1px solid var(--grid)" },
-      el("span", { class: "muted" }, "AI"),
-      analysts.map((v) => el("span", { class: "chip" }, `${v.name} 短期${BIAS[v.bias_short]} · 中长期${BIAS[v.bias_long]}`)),
-      ag ? el("span", { class: "sub" }, ag.short && ag.long ? "两者一致" : `${[ag.short ? "" : "短期", ag.long ? "" : "中长期"].filter(Boolean).join("、")}分歧`) : null));
-  }
-  const hard = hardEvents(d);
-  if (hard.length) adv.appendChild(el("div", { class: "notice warn", style: "margin-top:12px" }, "⚠️ 24 小时内重大事件：" + hard.join("；")));
-  panel.appendChild(adv);
-
-  const board = [...startedBoard(d), ...d.short.filter((a) => a.value !== null).map((a) => ({ ...a, name: a.label }))].sort((a, b) => (b.return || 0) - (a.return || 0));
-  const top = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "策略表现"),
-    el("button", { class: "link-btn", type: "button", onclick: () => showTab("strategies") }, `全部 ${d.leaderboard.length + d.short.length} 个策略 →`)));
-  if (!board.length) top.appendChild(el("div", { class: "empty" }, "账户尚未开始"));
-  top.appendChild(el("ul", { class: "list" }, board.slice(0, 4).map((b, i) => el("li", {}, el("div", { class: "row" },
-    el("span", { class: "rank" }, String(i + 1)), el("span", { class: "swatch", style: `background:${seriesColor(b.key)}` }),
-    el("span", { class: "grow ellipsis" }, b.name), el("strong", {}, pct(b.return)))))));
-  const acts = [...d.fills.map((f) => ({ ts: f.ts, text: `${d.strategy_names[f.strategy] || f.strategy} ${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`, key: f.strategy })),
-                ...d.alerts.filter((a) => !a.title.includes("监控已启动")).map((a) => ({ ts: a.ts, text: a.title }))].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 6);
-  const recent = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "最近动态"),
-    el("button", { class: "link-btn", type: "button", onclick: () => showTab("records") }, "全部记录 →")),
-    acts.length ? el("ul", { class: "list" }, acts.map((a) => el("li", {}, el("div", { class: "row" },
-      a.key ? el("span", { class: "swatch", style: `background:${seriesColor(a.key)}` }) : null,
-      el("span", { class: "grow ellipsis" }, a.text), el("span", { class: "sub" }, fmtTs(a.ts)))))) : el("div", { class: "empty" }, "暂无"));
-  panel.appendChild(el("div", { class: "grid-2" }, top, recent));
+  const panel=clear(document.getElementById("panel-overview"));
+  panel.appendChild(renderMarketSummary(d));
+  panel.appendChild(modelSummary(d));
+  const plans=((d.autonomous || {}).plans || []).filter((p)=>p.status==="pending");
+  const fills=d.fills.filter((f)=>f.strategy.includes(":" )).slice(0,4);
+  panel.appendChild(card("最新操作与待成交委托",el("button",{class:"link-btn",onclick:()=>showTab("records")},"操盘记录 →"),
+    plans.length ? el("ul",{class:"list"},plans.slice(0,6).map((p)=>el("li",{},`${d.strategy_names[p.account]} · ${TRADE_ACTIONS[p.decision.action]} · 等待条件`,el("div",{class:"sub"},`限价 ${num(p.decision.limit_price_cny)} 元/克 · 有效至 ${fmtTs(p.expires_at)}`)))) : el("div",{class:"sub"},"暂无待成交委托"),
+    fills.length ? el("ul",{class:"list"},fills.map((f)=>el("li",{},`${d.strategy_names[f.strategy]} · ${f.side==="buy"?"买入":"卖出"} ${num(f.grams,4)} 克 @ ${num(f.price)} 元/克`,el("div",{class:"sub"},`${fmtTs(f.ts)} · ${f.reason}`)))) : el("div",{class:"empty"},"暂无 AI 账户成交")));
+  const events=hardEvents(d);
+  panel.appendChild(card("近期重要事件",el("button",{class:"link-btn",onclick:()=>showTab("market")},"行情与日历 →"),
+    events.length ? el("ul",{class:"list"},events.map((v)=>el("li",{},v))) : el("div",{class:"sub"},"未来24小时暂无已识别重大事件")));
 }
 
-/* ── 策略 ───────────────────────────────────────────────────────────── */
 function renderStrategies(d) {
   const panel = clear(document.getElementById("panel-strategies"));
-  const scopeMatches = (key) => strategyScope === "all" || (strategyScope === "ai" ? key.includes(":") : !key.includes(":"));
+  const scopeMatches = (key) => assetMatches(key) && (strategyScope === "all" || (strategyScope === "ai" ? key.includes(":") : !key.includes(":")));
   const series = d.equity.series.filter((s) => scopeMatches(s.key)).map((s) => ({ ...s, color: seriesColor(s.key) }));
-  const scope = el("div", { class: "chips", style: "margin-bottom:12px" }, [["ai", "AI 账户"], ["rules", "对照组"], ["all", `全部 ${d.leaderboard.length + d.short.length} 个策略`]].map(([key, label]) =>
-    el("button", { class: "filter-btn", type: "button", "aria-pressed": String(strategyScope === key), onclick: () => { strategyScope = key; renderStrategies(DATA); drawEquity(); } }, label)));
+  const scope = el("div", { class: "chips", style: "margin-bottom:12px" }, [["ai", "AI 账户"], ["rules", "对照组"], ["all", `全部 ${d.leaderboard.length + d.short.length} 个账户`]].map(([key, label]) =>
+    el("button", { class: "filter-btn", type: "button", "aria-pressed": String(strategyScope === key), onclick: () => { strategyScope = key; assetModel="all";assetPeriod="all";assetStart="all";renderStrategies(DATA); drawEquity(); } }, label)));
+  const chooser=(label,choices,value,set)=>el("label",{},label+" ",el("select",{"aria-label":label,onchange:(e)=>{set(e.target.value);renderStrategies(DATA);drawEquity();}},choices.map(([v,t])=>el("option",{value:v,selected:value===v},t))));
+  panel.appendChild(card("账户筛选",null,scope,el("div",{class:"row",style:"flex-wrap:wrap"},
+    chooser("资产模型",[["all","全部模型"],["claude","Claude"],["codex","Codex"]],assetModel,(v)=>assetModel=v),
+    chooser("资产周期",[["all","全部周期"],["short","短线"],["medium","中线"],["long","长线"]],assetPeriod,(v)=>assetPeriod=v),
+    chooser("资产起点",[["all","全部起点"],["full","初始满仓"],["empty","初始空仓"]],assetStart,(v)=>assetStart=v))));
   const legend = el("div", { class: "legend" }, series.map((s) => el("button", { class: "chip-btn", type: "button", "aria-pressed": String(!hiddenSeries.has(s.key)),
     onclick: (e) => { hiddenSeries.has(s.key) ? hiddenSeries.delete(s.key) : hiddenSeries.add(s.key); e.currentTarget.setAttribute("aria-pressed", String(!hiddenSeries.has(s.key))); drawEquity(); } },
     el("span", { class: "swatch", style: `background:${s.color}` }), s.name)));
-  panel.appendChild(card("收益率走势", el("span", { class: "sub" }, "扣除卖出手续费 · 按本金计算收益率"), scope, legend, el("div", { class: "chart", id: "equity-chart" })));
+  panel.appendChild(card("收益率走势", el("span", { class: "sub" }, "扣除卖出手续费 · 按本金计算收益率"), legend, el("div", { class: "chart", id: "equity-chart" })));
 
-  const box = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, d.trading_mode === "six_account" ? "自主账户与规则对照" : "中长线与买入持有"),
-    el("span", { class: "sub" }, startedBoard(d).length ? `每户本金 ${num(startedBoard(d)[0].budget, 0)} 元 · 点开看规则与成交` : "")));
-  const sorted = d.leaderboard.slice().sort((a, b) => (Number(!a.analyst) - Number(!b.analyst)) || a.key.localeCompare(b.key));
+  const box = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, d.trading_mode === "six_account" ? "账户资产" : "中长线与买入持有"),
+    el("span", { class: "sub" }, startedBoard(d).length ? `每户本金 ${num(startedBoard(d)[0].budget, 0)} 元 · 点开看账户详情` : "")));
+  const sorted = d.leaderboard.filter((a)=>scopeMatches(a.key)).sort((a, b) => (Number(!a.analyst) - Number(!b.analyst)) || a.key.localeCompare(b.key));
   sorted.forEach((b) => {
     const fills = d.fills.filter((f) => f.strategy === b.key);
-    const meta = (b.paused ? "已暂停 · 仅保留风控 · " : "") + (b.started ? `回撤 ${(b.max_drawdown * 100).toFixed(1)}% · 持仓 ${num(b.grams, 1)} 克${b.avg_cost ? ` · 成本 ${num(b.avg_cost, 1)}` : ""} · ${b.fills} 笔` : (b.requires_ai ? "等待首次有效 AI 判断" : "等待首个交易日"));
-    box.appendChild(el("details", { class: "strategy" },
+    const meta = (b.paused ? "已暂停 · 仅保留风控 · " : "") + (b.started ? `现金 ${num(b.cash,0)} 元 · 回撤 ${(b.max_drawdown * 100).toFixed(1)}% · 持仓 ${num(b.grams, 1)} 克${b.avg_cost ? ` · 成本 ${num(b.avg_cost, 1)}` : ""} · ${b.fills} 笔` : (b.requires_ai ? "等待首次有效 AI 判断" : "等待首个交易日"));
+    box.appendChild(el("details", { class: "strategy", "data-detail-key":b.key },
       el("summary", {},
         el("div", { class: "name" }, el("span", { class: "swatch", style: `background:${seriesColor(b.key)}` }), el("span", { class: "ellipsis" }, b.name),
           el("span", { class: "tag" }, b.horizon), b.requires_ai ? el("span", { class: "tag ai" }, "AI") : null),
@@ -544,14 +509,13 @@ function renderStrategies(d) {
         el("div", { class: "value" }, b.started ? `${num(b.value, 0)} 元` : "")),
       el("div", { class: "body" },
         el("p", { class: "secondary", style: "margin:0 0 8px" }, b.description),
-        b.started ? el("div", { class: "sub", style: "margin-bottom:6px" }, `起始 ${fmtTs(b.started_at)} · 现金 ${num(b.cash, 0)} 元 · 手续费 ${num(b.fees)} 元`) : null,
-        fills.length ? el("ul", { class: "list" }, fills.map((f) => el("li", {}, el("div", { class: "row" },
-          el("span", { class: "grow" }, `${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`), el("span", { class: "sub" }, fmtTs(f.ts))),
-          el("div", { class: "sub" }, f.reason)))) : el("div", { class: "sub" }, "暂无成交"))));
+        b.started ? el("div", { class: "sub", style: "margin-bottom:6px" }, `起始 ${fmtTs(b.started_at)} · 手续费 ${num(b.fees)} 元`) : null,
+        el("button",{class:"link-btn",onclick:()=>{recordModel=b.analyst || "rules";fillFilter=b.key;recordKind="fills";resetHistory();showTab("records");}},"查看成交记录 →"))));
   });
   panel.appendChild(box);
+  const curve=panel.querySelector("#equity-chart").closest(".card");panel.appendChild(curve);
 
-  const shortCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "短线日内"),
+  const shortCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "规则短线对照账户"),
     el("span", { class: "sub" }, "独立资金账户 · T1 减半、T2 清仓")));
   const grid = el("div", { class: "short-grid" });
   d.short.slice().sort((a, b) => Number(!a.analyst) - Number(!b.analyst)).forEach((sp) => {
@@ -572,22 +536,16 @@ function renderStrategies(d) {
     } else if (!sp.recent.length) {
       part.appendChild(el("div", { class: "sub", style: "margin-top:8px" }, `自 ${fmtTs(sp.running_since)} 运行，尚未触发交易（需进入低吸区且扣费后 R:R ≥ 1.5${sp.analyst ? "，方向由该模型判断" : "，并通过门控"}）`));
     }
-    if (sp.recent.length) {
-      part.appendChild(el("ul", { class: "list", style: "margin-top:6px" }, sp.recent.slice(0, 6).map((r) => el("li", {}, el("div", { class: "row" },
-        el("span", { class: "grow" }, `${fmtTs(r.opened_at)} 入 ${num(r.entry_cny)}`),
-        el("strong", {}, r.status === "open" && !r.realized_cny ? "持仓中" : signed(r.realized_cny))),
-        el("div", { class: "sub" }, `止损 ${num(r.stop_cny)} · T1 ${num(r.t1_cny)} · T2 ${num(r.t2_cny)}${r.close_reason ? " · " + r.close_reason : ""}`),
-        r.plan_json ? decisionDetails({ view: JSON.parse(r.plan_json).decision, analyst: sp.analyst, version: JSON.parse(r.plan_json).version, execution_quote: JSON.parse(r.plan_json).execution_quote }) : null))));
-    }
+    part.appendChild(el("button",{class:"link-btn",onclick:()=>{recordModel=sp.analyst || "rules";fillFilter=sp.key;recordKind="cycles";resetHistory();showTab("records");}},"查看交易周期 →"));
     grid.appendChild(part);
   });
   shortCard.appendChild(grid);
-  panel.appendChild(shortCard);
+  if(strategyScope!=="ai" && assetModel==="all" && assetPeriod==="all" && assetStart==="all") {panel.appendChild(shortCard);panel.appendChild(ruleReference(d));}
 }
 function drawEquity() {
   const c = document.getElementById("equity-chart");
   if (!c || !DATA) return;
-  const series = DATA.equity.series.filter((s) => !hiddenSeries.has(s.key) && (strategyScope === "all" || (strategyScope === "ai" ? s.key.includes(":") : !s.key.includes(":")))).map((s) => ({ ...s, color: seriesColor(s.key) }));
+  const series = DATA.equity.series.filter((s) => assetMatches(s.key) && !hiddenSeries.has(s.key) && (strategyScope === "all" || (strategyScope === "ai" ? s.key.includes(":") : !s.key.includes(":")))).map((s) => ({ ...s, color: seriesColor(s.key) }));
   lineChart(c, { series, yFormat: (v) => pct(v, 1), tipFormat: (v) => pct(v, 2), zeroLine: true, emptyText: "账户刚开始运行，曲线积累几个小时后出现" });
 }
 
@@ -610,7 +568,7 @@ function modelControls(d) {
         finally { button.disabled = false; }
       } }, c.enabled ? "关闭模型" : "开启模型");
     const message = el("div", { class: "sub", role: "status" }, !c.enabled ? "已暂停，历史战绩保留" :
-      c.available === false ? "后端不可用：需配置 API 或登录本机 CLI" : running ? "正在分析 · 串行运行" : queued ? "排队中 · 等待前一个模型完成" : "已开启，按调度分析；重新开启后先获取新判断");
+      c.available === false ? "分析后端暂不可用" : running ? "正在分析 · 串行运行" : queued ? "排队中 · 等待前一个模型完成" : "已开启，按调度分析；重新开启后先获取新判断");
     if (c.daily_cap) message.appendChild(el("div",{},`今日调用 ${c.runs_today || 0} / ${c.daily_cap} 轮 · 其中 ${c.urgent_reserve} 轮预留重大事件`));
     if (c.enabled && c.pending_events) message.appendChild(el("div", {}, `待覆盖 ${c.pending_events} 个新事件 · 冷却期间保留，成功分析后确认`));
     grid.appendChild(el("div", {}, el("div", { class: "row" }, el("strong", { class: "grow" }, c.name),
@@ -623,13 +581,14 @@ function modelControls(d) {
 }
 function renderComparison(d) {
   const panel = clear(document.getElementById("panel-compare"));
-  panel.appendChild(modelControls(d));
   const cmp = d.comparison || { models: [] };
   const autonomous = d.trading_mode === "six_account";
   const accountOrder = autonomous ? Object.keys(ACCOUNT_LABELS) : ["position_ai", "short_ai"];
-  panel.appendChild(el("div", { class: "notice info" }, autonomous ? "每模型6个独立账户：短/中/长各满仓与空仓，各10万元。起点基准为各满仓账户从开账价持有不动、空仓账户持有现金；关闭期间继续计入盈亏。旧版概率账户不参与本实验。" : "仅比较中长线与短线：每个 AI 两个独立账户、相同本金与成本。胜率按完整平仓计，暂停期间仍计入收益。"));
+  const comparisonNote=el("details",{class:"more card"},el("summary",{},"比较口径"),el("p",{class:"sub"},"每模型6个独立账户，每户10万元。满仓起点基准为开账时持有不动，空仓基准为现金。完整平仓计胜率，关闭期间继续计入盈亏。旧版概率账户不参与本实验。"));
+  const started=cmp.models.filter((m)=>m.started_at);
+  if(started.length !== cmp.models.length || new Set(started.map((m)=>m.started_at)).size>1) panel.appendChild(el("div",{class:"notice warn"},"实验起点不同或有模型尚未开始，请结合运行时间、同起点基准与平仓样本比较，不按收益直接排名。"));
   panel.appendChild(el("div", { class: "grid-2" }, cmp.models.map((m) => card(m.name,
-    el("span", { class: "sub" }, m.started_at ? `起始 ${fmtTs(m.started_at)}` : "尚未开始"),
+    el("span", { class: "sub" }, ((d.model_controls || []).find((c)=>c.key===m.key)?.enabled ? "已开启 · " : "已暂停 · ") + (m.started_at ? `起始 ${fmtTs(m.started_at)} · 已运行 ${Math.max(0,(Date.now()-new Date(m.started_at))/86400000).toFixed(1)} 天` : "尚未开始")),
     el("div", { class: "mini-stats" },
       el("div", { class: "mini-stat" }, el("div", { class: "l" }, "总收益率"), el("div", { class: "v" }, pct(m.return))),
       el("div", { class: "mini-stat" }, el("div", { class: "l" }, "交易胜率"), el("div", { class: "v" }, rate(m.win_rate))),
@@ -641,7 +600,7 @@ function renderComparison(d) {
   const table = el("table", {}, el("thead", {}, el("tr", {}, ["策略", "模型", "收益率", autonomous ? "起点基准" : "规则基准", "AI 增益（百分点）", "回撤", "胜率", "平仓次数"].map((t) => el("th", {}, t)))),
     el("tbody", {}, accountOrder.flatMap((key) => cmp.models.flatMap((m) => m.accounts.filter((a) => a.strategy === key).map((a) =>
       el("tr", {}, el("td", {}, ({...ACCOUNT_LABELS, position_ai: "中长线", short_ai: "短线"})[key]),
-        el("td", {}, m.name + (a.paused ? " · 已暂停" : "")), el("td", {}, pct(a.return)), el("td", {}, pct(a.baseline_return)), el("td", {}, a.excess_return === null ? "—" : signed(a.excess_return * 100)), el("td", {}, `${num(a.max_drawdown * 100)}%`),
+        el("td", {}, m.name + (!a.started_at ? " · 未开始" : a.paused ? " · 已暂停" : "")), el("td", {}, pct(a.return)), el("td", {}, pct(a.baseline_return)), el("td", {}, a.excess_return === null ? "—" : signed(a.excess_return * 100)), el("td", {}, `${num(a.max_drawdown * 100)}%`),
         el("td", {}, a.win_rate_applicable ? rate(a.win_rate) : "不适用"), el("td", {}, a.trades)))))));
   const mobilePairs = el("div", { class: "compare-mobile" }, accountOrder.map((key) =>
     el("div", {}, el("strong", {}, ACCOUNT_LABELS[key] || (key === "position_ai" ? "中长线" : "短线")),
@@ -651,6 +610,8 @@ function renderComparison(d) {
         el("div", { class: "sub" }, `胜率 ${rate(a.win_rate)} · 平仓 ${a.trades} 次 · 回撤 ${num(a.max_drawdown * 100)}%`),
         el("div", { class: "sub" }, `${autonomous ? "起点基准" : "规则基准"} ${pct(a.baseline_return)} · AI 增益 ${a.excess_return === null ? "—" : signed(a.excess_return * 100)} 个百分点`)))))));
   panel.appendChild(card("同类策略对比", null, el("div", { class: "table-wrap compare-desktop" }, table), mobilePairs));
+  panel.appendChild(panel.querySelector("#comparison-chart").closest(".card"));
+  panel.appendChild(comparisonNote);
   panel.appendChild(card("3 个对照账户", el("span", { class: "sub" }, "持有判断择时价值；规则账户判断 AI 增益"),
     el("div", { class: "baseline-grid" }, (cmp.baselines || []).map((b) => el("div", { class: "mini-stat" },
       el("div", { class: "l" }, b.name || b.label), el("div", { class: "v" }, pct(b.return)),
@@ -721,13 +682,7 @@ function autonomousAccounts(d) {
   for(const a of rows) {
     const plan=a.plan, decision=plan && plan.decision;
     const box=card(`${ANALYST[a.model]} · ${ACCOUNT_LABELS[a.start_mode]}`,el("span",{class:"tag"},a.paused?"模型已关闭":a.started?"已开始":"等待开账"),
-      el("div",{class:"mini-stats",style:"margin-top:0"},
-        el("div",{class:"mini-stat"},el("div",{class:"l"},"收益率"),el("div",{class:"v"},pct(a.return))),
-        el("div",{class:"mini-stat"},el("div",{class:"l"},"当前仓位"),el("div",{class:"v"},`${num(a.position_pct,1)}%`)),
-        el("div",{class:"mini-stat"},el("div",{class:"l"},"完整平仓胜率"),el("div",{class:"v"},rate(a.win_rate)))),
-      el("div",{class:"sub",style:"margin-top:10px"},`现金 ${num(a.cash,0)} 元 · 持有 ${num(a.grams,4)} 克 · 成本 ${num(a.avg_cost)} 元/克`),
-      el("div",{class:"sub"},`净值 ${num(a.value)} 元 · 回撤 ${num(a.max_drawdown*100)}% · 已平仓 ${a.trades} 次`),
-      el("div",{class:"sub"},`止损 ${num(a.stop_price)} · 止盈 ${num(a.target_price)} 元/克`));
+      el("div",{class:"sub"},`当前保护：止损 ${num(a.stop_price)} · 止盈 ${num(a.target_price)} 元/克`));
     if(decision) {
       box.appendChild(el("div",{class:`notice ${plan.status==="rejected"?"warn":"info"}`,style:"margin-top:10px"},
         el("strong",{},`${TRADE_ACTIONS[decision.action]} · ${PLAN_STATUS[plan.status] || plan.status}`),
@@ -739,7 +694,7 @@ function autonomousAccounts(d) {
     } else box.appendChild(el("div",{class:"sub",style:"margin-top:10px"},a.started?"等待本模式首次六账户决策":"模型开启、后端可用且京东报价有效后，统一初始化六个账户"));
     grid.appendChild(box);
   }
-  panel.appendChild(el("button", {class:"link-btn",type:"button",style:"margin-bottom:12px",onclick:()=>{recordModel=accountModel === "all" ? "all" : accountModel;fillFilter="all";renderRecords(DATA);showTab("records");}}, "查看操盘记录 →"));
+  panel.appendChild(el("button", {class:"link-btn",type:"button",style:"margin-bottom:12px",onclick:()=>{recordModel=accountModel === "all" ? "all" : accountModel;fillFilter="all";recordKind="fills";resetHistory();showTab("records");}}, "查看操盘记录 →"));
   panel.appendChild(rows.length?grid:el("div",{class:"empty"},"当前筛选下暂无账户"));
   return panel;
 }
@@ -748,12 +703,13 @@ function renderAI(d) {
   const panel = clear(document.getElementById("panel-ai"));
   panel.appendChild(modelControls(d));
   const ai = d.ai || {};
-  if (d.trading_mode === "six_account") panel.appendChild(autonomousAccounts(d));
+
+  const inputHost=el("details",{class:"more card"},el("summary",{},"本轮分析输入详情"));
   const inputs = d.ai_inputs;
   if (inputs) {
     const labels = { fresh: "可用", stale: "源数据过期", unavailable: "获取失败", unconfigured: "未配置" };
     const jd = inputs.jd_research || {};
-    panel.appendChild(card("共同分析数据", el("span", { class: "sub" }, `最近一次准备 ${fmtTs(inputs.at)}`),
+    inputHost.appendChild(card("共同分析数据", el("span", { class: "sub" }, `最近一次准备 ${fmtTs(inputs.at)}`),
       el("p", { class: "market-section-note" }, "两个模型共用基础数据，串行独立判断；允许按预算补搜遗漏信息。此处记录当时输入，最新数据见行情页。"),
       el("div", { class: "chips" }, el("span", { class: "chip" }, `快讯 ${inputs.news_count} 条`),
         el("span", { class: "chip" }, inputs.max_searches > 0 ? `补搜预算 ${inputs.max_searches} 次 / 模型` : "本轮未开放补搜")),
@@ -762,18 +718,18 @@ function renderAI(d) {
       el("a", { href: "https://youqian.jd.com/", target: "_blank", rel: "noopener noreferrer", class: "sub" }, "京东参考数据由京东金融有钳提供")));
   }
   if (!ai.enabled || !(ai.analysts || []).length) {
-    panel.appendChild(card("AI 消息面", null, el("div", { class: "empty" }, ai.enabled ? "等待首次分析（工作日 08:40 / 20:45，及数据公布后）" : "未启用：需要 ANTHROPIC_API_KEY，或本机已登录的 Claude Code / Codex")));
+    panel.appendChild(card("最新分析", null, el("div", { class: "empty" }, ai.enabled ? "等待首次分析，满足价格变化、事件或兜底条件时排队" : "分析后端尚未就绪，请查看上方模型状态")));
   } else {
     const ag = aiAgreement(d);
     panel.appendChild(el("div", { class: `notice ${ag ? (ag.short && ag.long ? "good" : "warn") : "info"}` },
-      ag ? `两个 AI：短期${ag.short ? "一致" : "分歧"}，中长期${ag.long ? "一致" : "分歧"}` : "AI 消息面",
-      el("span", { class: "muted" }, ` · 各模型独立操盘 · 工作日 08:40 / 20:45 定时，美国重要数据公布后、30 分钟异动 ±0.6% 时加跑`)));
+      ag ? `两个 AI：短期${ag.short ? "一致" : "分歧"}，中长期${ag.long ? "一致" : "分歧"}` : "最新分析",
+      el("span", { class: "muted" }, ` · 两模型独立判断，概率用于预测评估`)));
     panel.appendChild(el("div", { class: "grid-2" }, ai.analysts.map((v) => {
       const box = viewBlock(v), c = (d.model_controls || []).find((x) => x.key === v.analyst);
       const p = ((d.snapshot || {}).ai_plans || {})[v.analyst];
       if (c && !c.enabled) box.appendChild(el("div", { class: "notice" }, "模型已关闭；以上为历史判断，持仓仅保留风控"));
       else if (c && c.changed_at && new Date(v.ts) <= new Date(c.changed_at)) box.appendChild(el("div", { class: "notice" }, "已重新开启，等待新判断；以上判断不用于开仓"));
-      else if (v.account_decisions) box.appendChild(el("div", {class:"sub"}, "本轮已统一提交6份账户决策，执行状态见上方六账户卡片。"));
+      else if (v.account_decisions) box.appendChild(el("div", {class:"sub"}, "本轮已统一提交6份账户决策，执行状态见下方六账户卡片。"));
       else if (d.trading_mode === "six_account") box.appendChild(el("div", {class:"sub"}, "旧版概率判断，仅作历史参考；等待本模式首轮六账户决策。"));
       else if (p && p.ok) box.appendChild(el("div", { class: "notice info", style: "margin-top:12px" },
         el("strong", {}, "本模型交易计划"), el("p", {}, p.summary),
@@ -782,12 +738,11 @@ function renderAI(d) {
       return box;
     })));
   }
-  panel.appendChild(scorecardCard(d));
-  if ((ai.history || []).length) {
-    panel.appendChild(card("分析记录", null, el("ul", { class: "list" }, ai.history.map((h) => el("li", {}, el("div", { class: "row" },
-      el("span", { class: "grow" }, `${h.analyst} · ${h.trigger || ""}`), el("span", { class: "sub" }, fmtTs(h.ts))),
-      el("div", { class: "sub" }, h.error ? "失败：" + h.error : `短期${BIAS[h.bias_short]} · 中长期${BIAS[h.bias_long]} · 置信${CONF[h.confidence]}`))))));
-  }
+  if(d.trading_mode === "six_account") panel.appendChild(autonomousAccounts(d));
+  if(inputs) panel.appendChild(inputHost);
+  panel.appendChild(el("details",{class:"more card"},el("summary",{},"预测准确度（区别于交易胜率）"),scorecardCard(d)));
+  panel.appendChild(card("分析历史",el("button",{class:"link-btn",onclick:()=>{recordKind="analysis";recordModel="all";fillFilter="all";resetHistory();showTab("records");}},"查看完整分析历史 →"),
+    el("div",{class:"sub"},"包含分析时间、触发原因、成功/失败，以及已到期的方向判断结果。")));
 }
 function scorecardCard(d) {
   const sc = d.scorecard;
@@ -823,13 +778,6 @@ function scorecardCard(d) {
   });
   box.appendChild(el("details", { class: "more" }, el("summary", {}, "计分规则"),
     el("p", { class: "sub", style: "margin:8px 0 0" }, "命中：看多→涨幅超过阈值；看空→跌幅超过阈值；中性→涨跌在阈值内。短期阈值取卖出手续费 0.4%。条形中线为 50%。基准为「判断前 N 日涨跌」的机械动量方向，AI 跑不赢它说明方向判断没有价值。新判断从分析完成后首个有效行情起算，5 分钟内无有效行情记为缺数据；历史记录保留原价格口径。预测命中率与交易胜率分别统计，操盘结果见「操盘对比」。样本少时结论不可靠。")));
-  const mark = (o) => !o ? "—" : o.status === "done" ? `${o.hit ? "✓" : "✗"}${pct(o.ret, 1)}` : o.status === "pending" ? "待" : "缺";
-  box.appendChild(el("details", { class: "more" }, el("summary", {}, `最近判断 ${sc.recent.length} 轮`),
-    el("ul", { class: "list" }, sc.recent.map((r) => el("li", {}, el("div", { class: "sub" }, fmtTs(r.ts)),
-      Object.entries(r.calls).map(([n, c]) => el("div", { class: "row", style: "font-size:13px;margin-top:4px" },
-        el("span", { style: "width:52px;flex:none" }, ANALYST[n] || n),
-        el("span", { class: "grow ellipsis" }, `短${BIAS[c.bias_short]} 长${BIAS[c.bias_long]} 置信${CONF[c.confidence]}`),
-        el("span", { class: "sub" }, ["1d", "3d", "20d", "60d"].map((k) => mark(c.outcomes[k])).join(" · ")))))))));
   return box;
 }
 
@@ -947,8 +895,15 @@ function renderMarket(d) {
   panel.appendChild(card("XAUUSD 走势", seg, el("div", { class: "chart", id: "price-chart" }),
     s.signals ? el("div", { class: "chips", style: "margin-top:10px" }, Object.entries(s.signals).map(([k, v]) => el("span", { class: "chip" }, `${k} ${v}`))) : null));
 
-  const planCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "短线计划与点位"),
-    el("span", { class: "sub" }, s.plan_source === "ai" ? "AI 版（消息面来自 AI）" : "原版（消息面按震荡）")));
+  panel.appendChild(renderEconomicCalendar(d));
+  panel.appendChild(renderMarketNews(d));
+  panel.appendChild(renderMacroData(d));
+  panel.appendChild(renderJDReference(d));
+}
+function ruleReference(d) {
+  const s=d.snapshot || {},p=plan(d);
+  const planCard = el("div", { class: "card" }, el("div", { class: "card-head" }, el("h2", { class: "card-title" }, "规则短线计划与点位"),
+    el("span", { class: "sub" }, "规则对照组参考，AI 自主账户按自身决策执行")));
   if (!p || !p.ok) planCard.appendChild(el("div", { class: "empty" }, s.market_open === false ? "休市中" : "暂无计划"));
   else {
     planCard.appendChild(el("div", { class: "kv" },
@@ -966,11 +921,7 @@ function renderMarket(d) {
         el("td", {}, r.cny ? num(r.cny, 1) : "—"), el("td", { class: "wrap sub" }, (r.reasons || []).join("、"))))))));
   }
 
-  panel.appendChild(renderMacroData(d));
-  panel.appendChild(renderEconomicCalendar(d));
-  panel.appendChild(renderJDReference(d));
-  panel.appendChild(planCard);
-  panel.appendChild(renderMarketNews(d));
+  return planCard;
 }
 
 function drawPrice() {
@@ -987,78 +938,127 @@ function drawPrice() {
 }
 
 /* ── 记录 ───────────────────────────────────────────────────────────── */
+let recordKind="fills", historyItems=[], historyOffset=0, historyMore=false, historyBusy=false, historyError="", historyGeneration=0;
+function resetHistory() {
+  historyOffset=0;historyItems=[];historyMore=false;historyError="";historyGeneration++;historyBusy=false;
+  renderRecords(DATA);fetchHistory();
+}
+async function refreshHistory() {
+  if(historyBusy) return;
+  if(!historyOffset) return fetchHistory();
+  const generation=historyGeneration;historyBusy=true;
+  try {
+    const count=historyOffset, next=[];let more=false;
+    for(let offset=0;offset<count;offset+=50) {
+      const q=new URLSearchParams({kind:recordKind,model:recordModel,days:recordDays,account:fillFilter,offset:String(offset),limit:"50"});
+      const r=await fetch("/api/history?"+q,{cache:"no-store",credentials:"same-origin"});if(!r.ok) throw new Error("历史刷新失败");
+      const p=await r.json();if(generation!==historyGeneration) return;next.push(...p.items);more=p.has_more;if(!more) break;
+    }
+    if(generation===historyGeneration) {historyItems=next;historyOffset=next.length;historyMore=more;historyError="";}
+  } catch(e) {if(generation===historyGeneration) historyError=e.message;}
+  finally {if(generation===historyGeneration) {historyBusy=false;renderRecords(DATA);}}
+}
+async function fetchHistory() {
+  if(historyBusy) return;
+  historyBusy=true;const generation=historyGeneration;
+  renderRecords(DATA);
+  try {
+    const q=new URLSearchParams({kind:recordKind,model:recordModel,days:recordDays,account:fillFilter,offset:String(historyOffset),limit:"50"});
+    const r=await fetch("/api/history?"+q,{cache:"no-store",credentials:"same-origin"});
+    if(!r.ok) throw new Error("历史加载失败，请重试");
+    const page=await r.json();
+    if(generation!==historyGeneration) return;
+    historyItems=historyItems.concat(page.items);historyOffset+=page.items.length;historyMore=page.has_more;historyError="";
+  } catch(e) { if(generation===historyGeneration) historyError=e.message; }
+  finally { if(generation===historyGeneration) {historyBusy=false;renderRecords(DATA);} }
+}
 function renderRecords(d) {
-  const panel = clear(document.getElementById("panel-records"));
-  const matches = (model, ts) => (recordModel === "all" || (recordModel === "rules" ? !model : model === recordModel)) &&
-    (recordDays === "all" || Date.now() - new Date(ts).getTime() <= Number(recordDays) * 86400000);
-  panel.appendChild(card("筛选交易记录", null, el("div", { class: "row" },
-    el("label", {}, "模型 ", el("select", { "aria-label": "筛选模型", onchange: (e) => { recordModel = e.target.value; renderRecords(DATA); } },
-      [["all", "全部模型"], ["claude", "Claude"], ["codex", "Codex"], ["rules", "对照账户"]].map(([v, text]) => el("option", { value: v, selected: v === recordModel }, text)))),
-    el("label", {}, "时间 ", el("select", { "aria-label": "筛选时间", onchange: (e) => { recordDays = e.target.value; renderRecords(DATA); } },
-      [["all", "全部已加载"], ["1", "最近 24 小时"], ["7", "最近 7 天"], ["30", "最近 30 天"]].map(([v, text]) => el("option", { value: v, selected: v === recordDays }, text)))))));
-  const visibleFills = d.fills.filter((f) => matches(f.strategy.includes(":") ? f.strategy.split(":")[0] : null, f.ts));
-  const visiblePlans = ((d.autonomous || {}).plans || []).filter((p) => matches(p.account.split(":")[0], p.created_at));
-  const keys = [...new Set([...visibleFills.map((f) => f.strategy), ...visiblePlans.map((p) => p.account)])];
-  if (fillFilter !== "all" && !keys.includes(fillFilter)) fillFilter = "all";
-  const filters = el("div", { class: "chips", style: "margin-bottom:6px" }, [["all", "全部"], ...keys.map((k) => [k, d.strategy_names[k] || k])].map(([k, l]) =>
-    el("button", { class: "filter-btn", type: "button", "aria-pressed": String(fillFilter === k), onclick: () => { fillFilter = k; renderRecords(DATA); } },
-      k !== "all" ? el("span", { class: "swatch", style: `background:${seriesColor(k)}` }) : null, l)));
-  if (d.trading_mode === "six_account") {
-    const plans = visiblePlans.filter((p) => fillFilter === "all" || p.account === fillFilter);
-    panel.appendChild(card("AI 操盘决策", el("span",{class:"sub"},"最近100条账户决策 · 持有与观望也会记录"), filters,
-      plans.length ? el("ul",{class:"list"},plans.map((p)=> {
-        const v=p.decision;
-        const quantity=v.action === "buy" ? `买入金额 ${num(v.amount_cny)} 元` : v.action === "sell" ? `卖出 ${num(v.grams,4)} 克` : "";
-        const execution=["buy","sell"].includes(v.action) ? (v.execution === "limit" ? `限价 ${num(v.limit_price_cny)} 元/克` : "按最新京东报价执行") : "";
-        return el("li",{},el("div",{class:"row",style:"flex-wrap:wrap"},
-          el("strong",{class:"grow"},`${d.strategy_names[p.account] || p.account} · ${TRADE_ACTIONS[v.action] || v.action}`),
-          el("span",{class:"tag"},PLAN_STATUS[p.status] || p.status),el("span",{class:"sub"},fmtTs(p.created_at))),
-          el("div",{style:"margin-top:6px"},v.reason),
-          el("div",{class:"sub"},[quantity,execution].filter(Boolean).join(" · ")),
-          el("div",{class:"sub"},`止损 ${num(v.stop_loss_cny)} · 止盈 ${v.clear_take_profit ? "移除" : num(v.take_profit_cny)} 元/克（未指定则保留原设置）`),
-          ["buy","sell"].includes(v.action) ? el("div",{class:"sub"},`委托有效至 ${fmtTs(p.expires_at)}`) : null,
-          p.reason ? el("div",{class:"sub"},p.reason) : null,
-          el("details",{class:"more"},el("summary",{},"决策详情"),el("div",{class:"sub"},`判断编号 #${p.view_id} · 计划 #${p.id}${v.invalidation ? " · 失效条件："+v.invalidation : ""}`)));
-      })) : el("div",{class:"empty"},"暂无匹配决策，模型完成分析后将显示六个账户的操作记录")));
-  }
-  const fills = visibleFills.filter((f) => fillFilter === "all" || f.strategy === fillFilter);
-  panel.appendChild(card(d.trading_mode === "six_account" ? "自主账户与规则成交" : "日线策略成交", el("span", { class: "sub" }, "最近成交 · 京东积存金报价 · 元/克"), d.trading_mode === "six_account" ? null : filters,
-    fills.length ? el("ul", { class: "list" }, fills.map((f) => el("li", {}, el("div", { class: "row" },
-      el("span", { class: "swatch", style: `background:${seriesColor(f.strategy)}` }),
-      el("span", { class: "grow" }, `${d.strategy_names[f.strategy] || f.strategy} ${f.side === "buy" ? "买入" : "卖出"} ${num(f.grams)} 克 @ ${num(f.price)}`),
-      el("span", { class: "sub", style: "white-space:nowrap" }, fmtTs(f.ts))), el("div", { class: "sub" }, f.reason + ` · 成交金额 ${num(f.grams * f.price)} 元` + (f.fee ? ` · 手续费 ${num(f.fee)} 元` : "")), decisionDetails(f.decision)))) : el("div", { class: "empty" }, "暂无成交")));
-  const shortRecords = d.short.flatMap((sp) => sp.recent.filter((r) => matches(sp.analyst, r.closed_at || r.opened_at)).map((r) => ({ ...r, label: sp.label, analyst: sp.analyst })))
-    .sort((a, b) => (b.closed_at || b.opened_at).localeCompare(a.closed_at || a.opened_at));
-  panel.appendChild(card("短线交易周期", el("span", { class: "sub" }, "每个账户最近 100 笔内筛选"),
-    shortRecords.length ? el("ul", { class: "list" }, shortRecords.map((r) => el("li", {},
-      el("div", { class: "row" }, el("strong", { class: "grow" }, `${r.label} · #${r.id} · ${r.status === "open" ? "持仓中" : "已平仓"}`),
-        el("span", {}, signed(r.realized_cny) + " 元")),
-      el("div", { class: "sub" }, `开仓 ${fmtTs(r.opened_at)} · ${num(r.grams)} 克 @ ${num(r.entry_cny)}${r.closed_at ? ` · 平仓 ${fmtTs(r.closed_at)} @ ${num(r.exit_cny)} · ${r.close_reason}` : ""}`),
-      r.plan_json ? decisionDetails({ view: JSON.parse(r.plan_json).decision, analyst: r.analyst, version: JSON.parse(r.plan_json).version, execution_quote: JSON.parse(r.plan_json).execution_quote }) : null,
-      r.close_decision ? decisionDetails(r.close_decision) : null))) : el("div", { class: "empty" }, "暂无匹配交易")));
-  panel.appendChild(card("提醒记录", el("span", { class: "sub" }, "最近 20 条"),
-    d.alerts.length ? el("ul", { class: "list" }, d.alerts.map((a) => el("li", {}, el("div", { class: "row" },
-      el("span", { class: "grow" }, a.title), el("span", { class: "sub" }, fmtTs(a.ts))),
-      el("div", { class: "sub" }, a.delivered ? "已推送微信" : "未推送（仅记录）")))) : el("div", { class: "empty" }, "暂无提醒")));
+  if(!d) return;
+  const panel=document.getElementById("panel-records");
+  preservePanel(panel,()=>{
+  clear(panel);
+  const chooser=(label,choices,value,set)=>el("label",{},label+" ",el("select",{"aria-label":label,onchange:(e)=>{set(e.target.value);resetHistory();}},choices.map(([v,t])=>el("option",{value:v,selected:value===v},t))));
+  const kinds=[["fills","实际成交"],["plans","AI 决策"],["cycles","交易周期"],["analysis","分析历史"],["alerts","系统提醒"]];
+  const keys=Object.entries(d.strategy_names).filter(([k])=>recordModel==="all" || (recordModel==="rules" ? !k.includes(":") : k.startsWith(recordModel+":")));
+  const controls=card("筛选交易记录",null,
+    el("div",{class:"chips"},kinds.map(([v,t])=>el("button",{class:"filter-btn",type:"button","aria-pressed":String(recordKind===v),onclick:()=>{recordKind=v;fillFilter="all";resetHistory();}},t))),
+    el("div",{class:"row",style:"flex-wrap:wrap;position:relative"},
+      chooser("筛选模型",[["all","全部模型"],["claude","Claude"],["codex","Codex"],["rules","对照账户"]],recordModel,(v)=>{recordModel=v;fillFilter="all";}),
+      chooser("筛选时间",[["all","全部历史"],["1","最近24小时"],["7","最近7天"],["30","最近30天"]],recordDays,(v)=>recordDays=v),
+      !["analysis","alerts"].includes(recordKind) ? chooser("筛选账户",[["all","全部账户"],...keys],fillFilter,(v)=>fillFilter=v) : null));
+  controls.classList.add("record-controls");panel.appendChild(controls);
+  const title=({fills:"实际成交",plans:"AI 操盘决策",cycles:"交易周期",analysis:"分析历史",alerts:"系统提醒"})[recordKind];
+  const items=historyItems;
+  const list=items.map((r)=>{
+    const label=d.strategy_names[r.account] || ANALYST[r.account] || r.account;
+    const heading=(text)=>el("div",{class:"row",style:"flex-wrap:wrap"},el("strong",{class:"grow"},text),el("span",{class:"sub"},fmtTs(r.stamp)));
+    if(recordKind==="fills") return el("li",{},heading(`${label} · ${r.side==="buy" ? "买入" : "卖出"} ${num(r.grams,4)} 克 @ ${num(r.price)} 元/克`),
+      el("div",{class:"sub"},`成交金额 ${num(r.grams*r.price)} 元 · 手续费 ${num(r.fee)} 元${r.side==="sell" && r.pnl != null ? " · 已实现盈亏 "+signed(r.pnl)+" 元" : ""}`),
+      el("div",{},r.reason),decisionDetails(r.decision));
+    if(recordKind==="plans") {const v=r.decision;return el("li",{},heading(`${label} · ${TRADE_ACTIONS[v.action]} · ${PLAN_STATUS[r.status] || r.status}`),
+      el("div",{},v.reason),el("div",{class:"sub"},v.action==="buy" ? `买入金额 ${num(v.amount_cny)} 元` : v.action==="sell" ? `卖出 ${num(v.grams,4)} 克` : ""),
+      ["buy","sell"].includes(v.action) ? el("div",{class:"sub"},`${v.execution==="limit" ? "限价 "+num(v.limit_price_cny)+" 元/克" : "按最新京东报价执行"} · 有效至 ${fmtTs(r.expires_at)}`) : null,
+      el("div",{class:"sub"},`止损 ${v.stop_loss_cny==null ? "保留原设置" : num(v.stop_loss_cny)+" 元/克"} · 止盈 ${v.clear_take_profit ? "移除" : v.take_profit_cny==null ? "保留原设置" : num(v.take_profit_cny)+" 元/克"}`),
+      r.reason ? el("div",{class:"sub"},r.reason):null,
+      el("details",{class:"more","data-detail-key":"plan:"+r.id},el("summary",{},"决策详情"),el("div",{class:"sub"},`判断 #${r.view_id} · 计划 #${r.id}${v.invalidation ? " · 失效条件："+v.invalidation : ""}`)));}
+    if(recordKind==="cycles") return el("li",{},heading(`${label} · #${r.id} · ${r.closed_at ? "已平仓" : "持仓中"}`),
+      el("div",{class:"sub"},`开仓 ${fmtTs(r.opened_at)}${r.closed_at ? " · 平仓 "+fmtTs(r.closed_at) : ""}`),
+      el("div",{},r.closed_at ? `已实现盈亏 ${signed(r.pnl ?? r.realized_cny)} 元` : `已回收金额 ${num(r.proceeds)} 元，完整周期尚未结束`));
+    if(recordKind==="analysis") {const v=r.view || {};return el("li",{},heading(`${label} · ${r.error ? "失败" : "成功"}`),el("div",{class:"sub"},r.trigger || ""),
+      el("div",{},r.error ? "失败："+r.error : v.summary || ""),
+      el("div",{class:"sub"},r.error ? "" : `短期${BIAS[v.bias_short] || "—"} · 中长期${BIAS[v.bias_long] || "—"}`),
+      r.outcomes ? el("div",{class:"sub"},Object.entries(r.outcomes).map(([k,o])=>`${k}：${o.status==="done" ? (o.hit ? "命中 " : "未命中 ")+pct(o.ret) : o.status==="pending" ? "待到期" : "缺数据"}`).join(" · ")) : null);}
+    return el("li",{},heading(r.title),el("div",{class:"sub"},r.delivered ? "已推送" : "仅记录"));
+  });
+  list.forEach((n,i)=>n.dataset.recordKey=`${recordKind}:${items[i].account}:${items[i].id || items[i].stamp}`);
+  const box=card(title,el("span",{class:"sub"},`已加载 ${items.length} 条 · 数据库分页，每页50条`),
+    list.length ? el("ul",{class:"list"},list) : el("div",{class:"empty"},historyBusy ? "正在加载历史…" : historyError || "暂无匹配记录"));
+  if(historyError) box.appendChild(el("div",{class:"notice warn",role:"status"},historyError));
+  if(historyMore || historyError) box.appendChild(el("button",{class:"link-btn",disabled:historyBusy,onclick:()=>fetchHistory()},historyBusy ? "加载中…" : historyError ? "重试" : "加载更多"));
+  panel.appendChild(box);
+  });
 }
 
 /* ── 渲染调度 ───────────────────────────────────────────────────────── */
 function renderActiveCharts() {
   if (!DATA) return;
-  if (activeTab === "overview") sparkline(document.getElementById("spark"), DATA.prices["1d"]);
+
   if (activeTab === "strategies") drawEquity();
   if (activeTab === "market") drawPrice();
   if (activeTab === "compare") drawComparison();
 }
+const panelSignatures=new Map(), panelOpen=new Map();
+function detailKey(n,i) {return n.dataset.detailKey || `${n.closest("[data-record-key]")?.dataset.recordKey || ""}:${n.closest(".card")?.querySelector("h2")?.textContent || ""}:${n.querySelector("summary")?.textContent || ""}:${i}`;}
+function preservePanel(panel,fn) {
+  const open=panelOpen.get(panel.id) || new Set();
+  [...panel.querySelectorAll("details")].forEach((n,i)=>{const key=detailKey(n,i);n.open ? open.add(key) : open.delete(key);});
+  panelOpen.set(panel.id,open);
+  const focus=document.activeElement, label=panel.contains(focus) ? focus.getAttribute("aria-label") : null;
+  const y=window.scrollY;fn();
+  [...panel.querySelectorAll("details")].forEach((n,i)=>n.open=open.has(detailKey(n,i)));
+  if(label) [...panel.querySelectorAll("[aria-label]")].find((n)=>n.getAttribute("aria-label")===label)?.focus({preventScroll:true});
+  if(!panel.hidden) window.scrollTo(0,y);
+}
+function renderPage(id,force=false) {
+  if(!DATA) return;
+  const dependencies={overview:[DATA.snapshot,DATA.execution,DATA.comparison,DATA.model_controls,DATA.fills,DATA.autonomous?.plans,DATA.macro?.hard_events_24h],
+    strategies:[DATA.leaderboard,DATA.equity,DATA.short,DATA.snapshot?.plan],
+    compare:[DATA.comparison,DATA.model_controls,DATA.equity],
+    ai:[DATA.ai,DATA.model_controls,(DATA.autonomous?.accounts || []).map(({key,model,start_mode,paused,started,stop_price,target_price,plan})=>({key,model,start_mode,paused,started,stop_price,target_price,plan})),DATA.ai_inputs,DATA.cadence,DATA.scorecard && Object.fromEntries(Object.entries(DATA.scorecard).filter(([k])=>k!=="evaluated_at"))],
+    market:[DATA.snapshot,DATA.execution,DATA.macro,DATA.jd_research,DATA.jin10,DATA.prices],records:[DATA.strategy_names]};
+  const signature=JSON.stringify(dependencies[id]);
+  if(force || panelSignatures.get(id)!==signature) {
+    const fn={overview:renderOverview,strategies:renderStrategies,compare:renderComparison,ai:renderAI,market:renderMarket,records:renderRecords}[id];
+    preservePanel(document.getElementById("panel-"+id),()=>fn(DATA));panelSignatures.set(id,signature);
+  }
+}
 function render() {
-  if (!DATA) return;
-  const s = DATA.snapshot || {};
-  const chip = clear(document.getElementById("market-chip"));
-  chip.appendChild(el("span", { class: "dot", style: `background:${s.market_open ? "var(--good)" : "var(--text-3)"}` }));
+  if(!DATA) return;
+  const s=DATA.snapshot || {},chip=clear(document.getElementById("market-chip"));
+  chip.appendChild(el("span",{class:"dot",style:`background:${s.market_open ? "var(--good)" : "var(--text-3)"}`}));
   chip.appendChild(document.createTextNode(s.market_open ? "交易中" : "休市"));
-  document.getElementById("updated").textContent = s.ts ? `行情 ${bjTime.format(new Date(s.ts))}` : "";
-  renderOverview(DATA); renderStrategies(DATA); renderAI(DATA); renderComparison(DATA); renderMarket(DATA); renderRecords(DATA);
-  renderActiveCharts();
+  document.getElementById("updated").textContent=s.ts ? `行情 ${bjTime.format(new Date(s.ts))}` : "";
+  renderPage(activeTab);renderActiveCharts();
 }
 async function load() {
   try {
@@ -1066,6 +1066,7 @@ async function load() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     DATA = await r.json();
     render();
+    if(activeTab==="records" && !historyBusy) refreshHistory();
   } catch (e) {
     document.getElementById("updated").textContent = "加载失败，稍后重试";
   }
