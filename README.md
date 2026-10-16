@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Data](https://img.shields.io/badge/Data-实时%20Investing.com-green)](https://www.investing.com/currencies/xau-usd)
-[![Stars](https://img.shields.io/github/stars/PlevanTem/Trade-Accumulated-Gold-CN?style=social)](https://github.com/PlevanTem/Trade-Accumulated-Gold-CN)
+[![Stars](https://img.shields.io/github/stars/blue-green-red/Trade-Accumulated-Gold-CN?style=social)](https://github.com/blue-green-red/Trade-Accumulated-Gold-CN)
 [![L站佬友链接](https://img.shields.io/badge/L%E7%AB%99%E4%BD%AC%E5%8F%8B-linux.do-5865F2)](https://linux.do/)
 
 [快速开始](#-快速开始) · [工作原理](#-工作原理) · [配置指南](#-配置指南) · [示例报告](#-效果展示)
@@ -17,6 +17,8 @@
 **作者微信**: `lelouchdbf` · 交流 / 定制 / 合作
 
 </div>
+
+> 当前维护仓库：[blue-green-red/Trade-Accumulated-Gold-CN](https://github.com/blue-green-red/Trade-Accumulated-Gold-CN)。本项目基于 [PlevanTem 的原项目](https://github.com/PlevanTem/Trade-Accumulated-Gold-CN) 扩展，保留上游来源与作者信息。
 
 > 当前监控默认采用「每模型六个自主账户」：短/中/长各有初始满仓和初始空仓账户，每户10万元，同轮统一决策。旧的概率门槛账户仅保留历史记录。运行细节见文末「六账户自主操盘与分析频率」。
 
@@ -141,11 +143,11 @@ Cursor 把全局 skills 放在 `~/.cursor/skills/`；项目级则放在仓库内
 
 ```bash
 # 全局安装（任何项目都能 @触发）
-git clone https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+git clone https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   ~/.cursor/skills/Trade-Accumulated-Gold-CN
 
 # 或：项目内安装（仅当前项目可见）
-git clone https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+git clone https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   ./.agents/skills/Trade-Accumulated-Gold-CN
 ```
 
@@ -167,7 +169,7 @@ Claude Code 的 skills 默认存放路径为 `~/.claude/skills/`。
 
 ```bash
 # 全局安装
-git clone https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+git clone https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   ~/.claude/skills/Trade-Accumulated-Gold-CN
 ```
 
@@ -194,7 +196,7 @@ OpenClaw 的 skills 路径与 Claude Code 类似，但前缀是 `~/.openclaw/`�
 
 ```bash
 # 推荐安装到全局（所有 agent 共享）
-git clone https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+git clone https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   ~/.openclaw/skills/Trade-Accumulated-Gold-CN
 ```
 
@@ -211,14 +213,14 @@ Gemini CLI 在 v0.x 起原生支持 Anthropic Skills 规范，目录约定为 `~
 
 ```bash
 # 方式 1：用官方命令（推荐）。本仓库 SKILL 不在 Git 根目录，必须指定 --path：
-gemini skills install https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+gemini skills install https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   --path .claude/skills/gold-analysis
 # 仅当前项目：
-gemini skills install https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+gemini skills install https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
   --scope workspace --path .claude/skills/gold-analysis
 
 # 方式 2：手动 git clone 全仓库后，在 Gemini 侧用 link 指向技能目录（示例）：
-# git clone https://github.com/PlevanTem/Trade-Accumulated-Gold-CN.git \
+# git clone https://github.com/blue-green-red/Trade-Accumulated-Gold-CN.git \
 #   ~/.gemini/skills/Trade-Accumulated-Gold-CN
 # gemini skills link ~/.gemini/skills/Trade-Accumulated-Gold-CN/.claude/skills/gold-analysis
 ```
@@ -506,9 +508,9 @@ MIT License — 自由使用、修改、分发，保留原始版权声明即可�
 
 <a href="https://www.star-history.com/?repos=PlevanTem%2FTrade-Accumulated-Gold-CN&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=PlevanTem/Trade-Accumulated-Gold-CN&type=date&theme=dark&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=PlevanTem/Trade-Accumulated-Gold-CN&type=date&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=PlevanTem/Trade-Accumulated-Gold-CN&type=date&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=blue-green-red/Trade-Accumulated-Gold-CN&type=date&theme=dark&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=blue-green-red/Trade-Accumulated-Gold-CN&type=date&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=blue-green-red/Trade-Accumulated-Gold-CN&type=date&legend=top-left&sealed_token=gQGGWEietgIFhpeGR0xkn9wDjPzc-byjquLQ0a1TAWFylvDvkr29qaL28E-VzgKh-KohuDROIq7Fk8j4aJyP5sMnJBCdr2B0RnYsn5_3-Cni-eVSBN4u7_RMMm8EGY-0wjT3vrRuhXeFuyvUwbdDE1GrfaL-KKmq_c9kh0bdyAbC9xkoB9Y-5g7acSeU" />
  </picture>
 </a>
 
