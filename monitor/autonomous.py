@@ -12,7 +12,7 @@ from .execution import execution_quote
 from .store import utc_now
 from .ai_events import enqueue
 
-VERSION = "autonomous-six-v1"
+VERSION = "autonomous-six-v2"
 PERIODS = {"short": ("短线", "intraday"), "medium": ("中线", "swing"), "long": ("长线", "position")}
 LABELS = {f"{period}_{start}": f"{label} · 初始{position}" for period,(label,_) in PERIODS.items() for start,position in (("full","满仓"),("empty","空仓"))}
 SCHEMA = """
@@ -57,7 +57,8 @@ class AccountDecision(BaseModel):
     limit_price_cny: Optional[float] = Field(default=None, gt=0, description="限价，元/克；市价填 null")
     stop_loss_cny: Optional[float] = Field(default=None, gt=0, description="持仓止损价，元/克；null 保留现有保护")
     take_profit_cny: Optional[float] = Field(default=None, gt=0, description="持仓全部止盈价，元/克；null 保留现有目标")
-    clear_take_profit: bool = Field(default=False, description="主动取消已有止盈目标；硬止损不可取消")
+    clear_stop_loss: bool = Field(default=False, description="主动取消已有止损；与 stop_loss_cny 同时设置无效")
+    clear_take_profit: bool = Field(default=False, description="主动取消已有止盈目标")
     valid_for_minutes: int = Field(ge=1, le=1440, description="从共同快照起算的计划有效分钟数，最长24小时")
     reason: str = Field(min_length=1, max_length=600)
     invalidation: str = Field(max_length=400, description="判断失效的理由；程序执行价格条件、保护价和到期，语义变化交给下次分析")
@@ -83,8 +84,8 @@ short_* 的 horizon 必须 intraday（数小时至3交易日）；medium_* 必�
 围绕对应周期制定计划，考虑已有仓位和卖出费用；长线可以保持不动，短线没有扣费后机会也可以观望。
 buy 的 amount_cny 是支出金额；sell 的 grams 是卖出克数。其他动作数量填 null。
 市价使用最新有效京东报价；限价买入等报价<=限价，限价卖出等报价>=限价。horizon 不创建额外账户。
-hold/wait 不成交，可更新持仓保护；cancel 撤销未成交委托并保留持仓保护。新决策替换该账户旧未成交委托。null 保护价保留现有值；如需取消旧止盈，clear_take_profit=true 且 take_profit_cny=null，硬止损不可取消。
-禁止借款、做空、跨账户使用资金；可以买满、分批买卖或清仓。新买入必须指定止损，不得超出输入硬止损约束。
+hold/wait 不成交，可更新持仓保护；cancel 撤销未成交委托，也可同时更新或撤销持仓保护。新决策替换该账户旧未成交委托。null 保护价保留现有值；如需取消止损，clear_stop_loss=true 且 stop_loss_cny=null；取消止盈用 clear_take_profit=true 且 take_profit_cny=null。
+禁止借款、做空、跨账户使用资金；可以买满、分批买卖或清仓。止损止盈完全由你决定，可不设、收紧、放宽或显式撤销，没有固定亏损阈值。初始满仓不预设保护，已有保护不会被程序自动删除；未设置保护时不会自动平仓。需要撤销保护请显式提交对应 clear 字段，单纯 null 保留原设置。是否设置保护及风险敞口由你按周期、成本和市场判断决定，在 reason 中说明选择。
 卖出费用以输入 constraints 为准，考虑手续费后的收益。不要机械复制六份决策，也不要为了交易而交易。
 委托有效期从 snapshot_at 起算，最长24小时；到期仅撤未成交委托，不强制平仓，保护单持续到持仓退出或新决策更新。
 账户版本或模型开关变化时程序会拒绝过时指令。参考最近拒绝原因，避免重复无效委托。
@@ -135,8 +136,8 @@ def summaries(conn, settings, price):
 class AutonomousPortfolio:
     def __init__(self, settings, store):
         self.settings, self.store = settings, store
-        if not 0 < settings.ai_hard_stop_loss < 1 or not math.isfinite(settings.account_budget) or settings.account_budget <= 0:
-            raise ValueError("账户本金或硬止损配置无效")
+        if not math.isfinite(settings.account_budget) or settings.account_budget <= 0:
+            raise ValueError("账户本金配置无效")
         store.conn.executescript(SCHEMA)
         from .ai import ensure_schema
         ensure_schema(store)
@@ -157,10 +158,9 @@ class AutonomousPortfolio:
         for a in rows:
             recent = conn.execute("SELECT ts,side,grams,price,fee,reason FROM ai_portfolio_fills WHERE account=? ORDER BY id DESC LIMIT 6", (a["key"],)).fetchall()
             accounts[a["start_mode"]] = {k:a[k] for k in ("key", "revision", "budget", "cash", "grams", "avg_cost", "value", "unrealized_pnl", "realized_pnl", "position_pct", "stop_price", "target_price")}
-            accounts[a["start_mode"]].update({"hard_stop_floor_cny": (a["avg_cost"] or (quote or {}).get("price", 0)) * (1 - self.settings.ai_hard_stop_loss),
-                "last_plan": {k:a["plan"][k] for k in ("status","reason","decision","expires_at")} if a["plan"] else None, "recent_fills": [dict(r) for r in recent]})
-        return {"accounts": accounts, "control_generation": control(conn,model)["generation"], "constraints": {"sell_fee_rate": self.settings.sell_fee_rate,
-            "spread_cny": self.settings.spread_cny, "max_position_pct": 100, "hard_stop_trigger_from_average_cost_pct": self.settings.ai_hard_stop_loss * 100,
+            accounts[a["start_mode"]].update({"last_plan": {k:a["plan"][k] for k in ("status","reason","decision","expires_at")} if a["plan"] else None, "recent_fills": [dict(r) for r in recent]})
+        return {"policy_version":VERSION, "accounts": accounts, "control_generation": control(conn,model)["generation"], "constraints": {"sell_fee_rate": self.settings.sell_fee_rate,
+            "spread_cny": self.settings.spread_cny, "max_position_pct": 100, "protection_policy": "model_discretion", "stop_loss_required": False, "can_clear_stop_loss": True,
             "max_input_age_minutes": self.settings.ai_decision_max_age_minutes, "max_plan_minutes": 1440,
             "currency": "CNY", "quantity_unit": "gram", "shorting": False}}
 
@@ -224,12 +224,9 @@ class AutonomousPortfolio:
             if d.get("grams") not in (None,0):
                 raise ValueError("买入应指定金额，不同时指定卖出克数")
             stop = d.get("stop_loss_cny")
-            if stop is None:
-                raise ValueError("新买入必须提供止损价")
             entry = price if d["execution"] == "market" else d["limit_price_cny"]
-            new_avg = (a["cost"] + amount) / (a["grams"] + amount / entry)
-            if not new_avg*(1-self.settings.ai_hard_stop_loss) <= stop < entry:
-                raise ValueError("买入止损须低于入场价，且不能超过硬止损范围")
+            if stop is not None and stop >= entry:
+                raise ValueError("买入止损须低于入场价")
         elif action == "sell":
             quantity = d.get("grams")
             if quantity is None or quantity <= 0 or quantity > a["grams"] + 1e-7:
@@ -241,11 +238,13 @@ class AutonomousPortfolio:
         if d["execution"] == "limit" and not d.get("limit_price_cny"):
             raise ValueError("限价委托缺少限价")
         stop, target = d.get("stop_loss_cny"), d.get("take_profit_cny")
+        if d.get("clear_stop_loss") and stop is not None:
+            raise ValueError("取消止损不能同时设置新止损")
         if d.get("clear_take_profit") and target is not None:
             raise ValueError("取消止盈不能同时设置新止盈")
-        if a["grams"] > 1e-9 and action not in ("buy","cancel"):
-            if stop is not None and (stop >= price or stop < a["cost"]/a["grams"]*(1-self.settings.ai_hard_stop_loss)):
-                raise ValueError("持仓止损价无效或超出硬止损范围")
+        if a["grams"] > 1e-9 and action != "buy":
+            if stop is not None and stop >= price:
+                raise ValueError("持仓止损价必须低于当前报价")
         entry = price if d["execution"] == "market" else d.get("limit_price_cny", price)
         if target is not None and target <= (entry if action == "buy" else price):
             raise ValueError("止盈价必须高于当前或计划入场价格")
@@ -274,12 +273,12 @@ class AutonomousPortfolio:
             self._reject(plan_id,str(exc))
             return
         c.execute("UPDATE ai_plans SET status='cancelled',reason='新决策替换旧委托' WHERE account=? AND status='pending' AND id<>?",(a["key"],plan_id))
-        if d["action"] == "cancel":
-            c.execute("UPDATE ai_plans SET status='executed',reason='已撤销未成交委托，保留持仓保护' WHERE id=?",(plan_id,))
-            return
         if a["grams"] > 1e-9 and d["action"] != "buy":
-            a["stop_price"] = d.get("stop_loss_cny") or a["stop_price"]
+            a["stop_price"] = None if d.get("clear_stop_loss") else d.get("stop_loss_cny") or a["stop_price"]
             a["target_price"] = None if d.get("clear_take_profit") else d.get("take_profit_cny") or a["target_price"]
+        if d["action"] == "cancel":
+            c.execute("UPDATE ai_plans SET status='executed',reason='已撤销未成交委托，已更新或保留持仓保护' WHERE id=?",(plan_id,))
+            return
         if d["action"] in ("hold","wait"):
             c.execute("UPDATE ai_plans SET status='executed',reason='已记录持有/观望及保护价' WHERE id=?",(plan_id,))
 
@@ -307,12 +306,10 @@ class AutonomousPortfolio:
                     refreshes.append((a["model"],"portfolio-init:"+a["model"],"六账户初始化，按新账户提交决策"))
                     if a["start_mode"].endswith("_full"):
                         self._fill(a,"buy",a["budget"]/quote["price"],quote,"实验初始化：满仓起点")
-                        a["stop_price"] = quote["price"]*(1-self.settings.ai_hard_stop_loss)
                 # 已有保护优先执行，与模型开关、预测和计划到期无关。
                 if a["grams"] > 1e-9:
-                    floor = a["cost"]/a["grams"]*(1-self.settings.ai_hard_stop_loss)
-                    stop = max(a["stop_price"] or floor,floor)
-                    reason = "持仓止损" if quote["price"] <= stop else "持仓止盈" if a["target_price"] and quote["price"] >= a["target_price"] else None
+                    stop = a["stop_price"]
+                    reason = "持仓止损" if stop is not None and quote["price"] <= stop else "持仓止盈" if a["target_price"] and quote["price"] >= a["target_price"] else None
                     if reason:
                         fill_id = self._fill(a,"sell",a["grams"],quote,reason)
                         c.execute("UPDATE ai_plans SET status='cancelled',reason='持仓保护已触发' WHERE account=? AND status='pending'",(a["key"],))
@@ -337,12 +334,12 @@ class AutonomousPortfolio:
                         continue
                     try:
                         self._validate(a,d,quote)
-                        if d["action"] == "buy" and quote["price"] <= d["stop_loss_cny"]:
+                        if d["action"] == "buy" and d.get("stop_loss_cny") is not None and quote["price"] <= d["stop_loss_cny"]:
                             raise ValueError("当前报价已跌破计划止损，拒绝买入")
                         grams = d["amount_cny"]/quote["price"] if d["action"] == "buy" else d["grams"]
                         fill_id = self._fill(a,d["action"],grams,quote,d["reason"],plan["view_id"],plan["id"])
                         if a["grams"] > 1e-9:
-                            a["stop_price"] = d.get("stop_loss_cny") or a["stop_price"]
+                            a["stop_price"] = None if d.get("clear_stop_loss") else d.get("stop_loss_cny") or a["stop_price"]
                             a["target_price"] = None if d.get("clear_take_profit") else d.get("take_profit_cny") or a["target_price"]
                         c.execute("UPDATE ai_plans SET status='executed',reason='按AI委托成交' WHERE id=?",(plan["id"],))
                         emitted.append({"key":f"autonomous:{fill_id}","title":a["key"]+" AI模拟"+("买入" if d["action"]=="buy" else "卖出"),"body":f"{grams:.4f} 克 @ 京东 {quote['price']:.2f} 元/克；{d['reason']}"})

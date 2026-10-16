@@ -66,7 +66,6 @@ class Settings:
     # 同时运行的模拟盘：hold/position 为规则日线，position_ai 按模型拆分；short 为短线基准
     strategies: tuple = tuple(s.strip() for s in os.environ.get("GOLD_MONITOR_STRATEGIES", "hold,position,position_ai,short,short_ai").split(",") if s.strip())
     ai_trading_mode: str = os.environ.get("GOLD_AI_TRADING_MODE", "six_account")
-    ai_hard_stop_loss: float = _env_float("GOLD_AI_HARD_STOP_LOSS", 0.12)
     ai_short_review_minutes: float = _env_float("GOLD_AI_SHORT_REVIEW_MINUTES", 0)
     ai_periodic_min_move_pct: float = _env_float("GOLD_AI_PERIODIC_MIN_MOVE_PCT", 0.4)
     ai_review_max_idle_minutes: float = _env_float("GOLD_AI_REVIEW_MAX_IDLE_MINUTES", 240)

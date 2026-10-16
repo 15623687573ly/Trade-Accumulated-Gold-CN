@@ -127,6 +127,8 @@ class AutonomousTests(unittest.TestCase):
         self.assertEqual(self.plan()['status'],'rejected')
 
     def test_old_account_revision_rejects_action_after_risk_fill(self):
+        self.publish(short_full=dict(stop_loss_cny=900))
+        self.m.portfolios.on_tick(snapshot())
         ctx=self.context()
         self.m.portfolios.on_tick(snapshot(870))
         self.publish(ctx,short_full=dict(action='sell',grams=20))
@@ -209,6 +211,78 @@ class AutonomousTests(unittest.TestCase):
         self.assertIsNone(self.account('long_full')['target_price'])
         self.assertEqual(self.account('long_full')['stop_price'],950)
         self.m.portfolios.on_tick(snapshot(1101))
+        self.assertEqual(self.account('long_full')['grams'],100)
+
+    def test_full_initialization_has_no_program_stop_and_input_has_no_loss_floor(self):
+        self.assertIsNone(self.account('short_full')['stop_price'])
+        ctx=self.context()['trading_accounts']
+        self.assertEqual(ctx['constraints']['protection_policy'],'model_discretion')
+        self.assertFalse(ctx['constraints']['stop_loss_required'])
+        self.assertNotIn('hard_stop_trigger_from_average_cost_pct',ctx['constraints'])
+        self.assertNotIn('hard_stop_floor_cny',ctx['accounts']['short_full'])
+        self.m.portfolios.on_tick(snapshot(750))
+        self.assertEqual(self.account('short_full')['grams'],100)
+
+    def test_buy_without_stop_or_target_does_not_force_close_at_twelve_percent(self):
+        self.publish(short_empty=dict(action='buy',amount_cny=10000))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertIsNone(self.account()['stop_price'])
+        self.assertIsNone(self.account()['target_price'])
+        set_enabled(self.store.conn,'codex',False)
+        self.m.portfolios.on_tick(snapshot(700))
+        self.assertEqual(self.account()['grams'],10)
+
+    def test_model_can_set_and_widen_stop_beyond_previous_loss_floor(self):
+        self.publish(short_empty=dict(action='buy',amount_cny=10000,stop_loss_cny=850))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertEqual(self.account()['stop_price'],850)
+        self.publish(short_empty=dict(stop_loss_cny=600))
+        self.m.portfolios.on_tick(snapshot())
+        self.m.portfolios.on_tick(snapshot(650))
+        self.assertEqual(self.account()['grams'],10)
+        self.m.portfolios.on_tick(snapshot(590))
+        self.assertEqual(self.account()['grams'],0)
+
+    def test_clear_stop_retains_target_and_never_reinstates_program_stop(self):
+        self.publish(long_full=dict(stop_loss_cny=950,take_profit_cny=1100))
+        self.m.portfolios.on_tick(snapshot())
+        self.publish(long_full=dict(clear_stop_loss=True))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertIsNone(self.account('long_full')['stop_price'])
+        self.assertEqual(self.account('long_full')['target_price'],1100)
+        restarted=Monitor(self.settings,True)
+        restarted.portfolios.on_tick(snapshot(850));restarted.store.conn.close()
+        self.assertEqual(self.account('long_full')['grams'],100)
+        set_enabled(self.store.conn,'codex',False)
+        self.m.portfolios.on_tick(snapshot(1101))
+        self.assertEqual(self.account('long_full')['grams'],0)
+
+    def test_clear_and_set_stop_together_rejected_without_mutating_existing_protection(self):
+        self.publish(long_full=dict(stop_loss_cny=900))
+        self.m.portfolios.on_tick(snapshot())
+        self.publish(long_full=dict(clear_stop_loss=True,stop_loss_cny=850))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertEqual(self.plan('long_full')['status'],'rejected')
+        self.assertEqual(self.account('long_full')['stop_price'],900)
+
+    def test_limit_buy_without_stop_can_fill(self):
+        self.publish(short_empty=dict(action='buy',execution='limit',amount_cny=10000,limit_price_cny=990))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertEqual(self.plan()['status'],'pending')
+        self.m.portfolios.on_tick(snapshot(980))
+        self.assertEqual(self.plan()['status'],'executed')
+        self.assertAlmostEqual(self.account()['grams'],10000/980)
+        self.assertIsNone(self.account()['stop_price'])
+
+    def test_cancel_order_can_also_clear_existing_stop(self):
+        self.publish(long_full=dict(stop_loss_cny=900,take_profit_cny=1100))
+        self.m.portfolios.on_tick(snapshot())
+        self.publish(long_full=dict(action='cancel',clear_stop_loss=True,clear_take_profit=True))
+        self.m.portfolios.on_tick(snapshot())
+        self.assertIsNone(self.account('long_full')['stop_price'])
+        self.assertIsNone(self.account('long_full')['target_price'])
+        self.assertEqual(self.plan('long_full')['status'],'executed')
+        self.m.portfolios.on_tick(snapshot(800))
         self.assertEqual(self.account('long_full')['grams'],100)
 
     def test_generation_change_while_waiting_rejects_old_context_before_call(self):

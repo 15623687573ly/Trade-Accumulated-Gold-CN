@@ -12,7 +12,7 @@ api 后端两步调用（联网搜索结果自带引用，而结构化输出不�
   1. research：默认解读共同上下文，可选 web_search 补充，输出带来源的中文研究笔记
   2. structure：不联网，把笔记 + 行情上下文整理成 MarketView（Pydantic 校验）
 
-边界：AI 只给方向、置信度、风险事件与驱动因素，不给任何价位；价位、仓位、R:R 全部由代码计算。
+六账户模式由 AI 统一提交六份自主决策，包含数量、委托、止损止盈；程序校验并执行。旧概率模式只输出方向等预测，价位由规则计算。
 每次判断（含笔记、来源、token 用量）存入 ai_views 表，供事后评估 AI 准确率。
 """
 
@@ -36,7 +36,7 @@ from .config import BJ, Settings
 from .store import Store, iso, utc_now
 from .controls import control, active
 from .ai_events import enqueue, read as read_events, acknowledge
-from .autonomous import PortfolioDecisions, TRADING_PROMPT
+from .autonomous import PortfolioDecisions, TRADING_PROMPT, VERSION as TRADING_VERSION
 
 log = logging.getLogger("monitor.ai")
 
@@ -348,7 +348,7 @@ class AIAnalyst:
             data["account_decisions"] = PortfolioDecisions.model_validate(view.model_dump()["account_decisions"]).model_dump()
             data["_account_inputs"] = {mode: {"key": a["key"], "revision": a["revision"]}
                 for mode,a in context["trading_accounts"]["accounts"].items()}
-            data["_trading_version"] = "autonomous-six-v1"
+            data["_trading_version"] = TRADING_VERSION
         data["_control_generation"] = self._generation
         for up, down in (("p_up_3d", "p_down_3d"), ("p_up_3m", "p_down_3m")):   # 截断到 0~1，两者之和不超过 1
             data[up], data[down] = (min(max(float(data[k]), 0.0), 1.0) for k in (up, down))

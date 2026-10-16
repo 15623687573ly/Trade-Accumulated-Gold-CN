@@ -31,7 +31,6 @@ from .strategies import REGISTRY
 from .controls import control, set_enabled, identity, short_labels, daily_keys
 from .performance import comparison, autonomous_comparison
 from .autonomous import summaries as portfolio_summaries, enabled as autonomous_enabled, keys as portfolio_keys, exists as portfolios_exist
-from urllib.parse import urlsplit
 from .execution import EXECUTION_NAME, execution_quote
 from .ai_events import read as read_events
 from .cadence import usage as ai_run_usage
@@ -289,7 +288,7 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
                 brief = {k:view[k] for k in ("p_up_3d","p_down_3d","p_up_3m","p_down_3m") if k in view}
                 brief.update({"summary":r["reason"],"_analyst":identity(r["account"])[0],"_view_id":r["view_id"],"_run_id":r["run_id"]})
                 fills.append({"strategy":r["account"],**{k:r[k] for k in ("ts","side","grams","price","fee","reason")},
-                    "decision_json":json.dumps({"analyst":identity(r["account"])[0],"version":"autonomous-six-v1","view":brief,
+                    "decision_json":json.dumps({"analyst":identity(r["account"])[0],"version":view.get("_trading_version","autonomous-six-v1"),"view":brief,
                         "order":action,"execution_quote":json.loads(r["quote_json"])})})
             fills.sort(key=lambda f:f["ts"],reverse=True)
         controls = []
@@ -398,7 +397,7 @@ def history_page(settings, query):
                 if r.get("view_id"):
                     v=conn.execute("SELECT view_json,run_id FROM ai_views WHERE rowid=?",(r["view_id"],)).fetchone()
                     view=json.loads(v["view_json"]) if v and v["view_json"] else {}
-                    r["decision"]={"analyst":r["account"].split(':')[0],"version":"autonomous-six-v1","view":{"summary":r["reason"],"_view_id":r["view_id"],"_run_id":v["run_id"] if v else None},"order":(view.get("account_decisions") or {}).get(r["account"].split(':')[1]),"execution_quote":json.loads(r["quote_json"])}
+                    r["decision"]={"analyst":r["account"].split(':')[0],"version":view.get("_trading_version","autonomous-six-v1"),"view":{"summary":r["reason"],"_view_id":r["view_id"],"_run_id":v["run_id"] if v else None},"order":(view.get("account_decisions") or {}).get(r["account"].split(':')[1]),"execution_quote":json.loads(r["quote_json"])}
             if kind=="analysis":
                 r["view"]=json.loads(r["view_json"]) if r.get("view_json") else {}
                 r["outcomes"]=outcomes.get((r["analyst"],r.get("completed_at") or r["ts"]))

@@ -34,7 +34,7 @@ from .store import Store, utc_now
 from .strategy import build_plan
 from .controls import active, control, identity, short_labels
 from .execution import execution_quote
-from .autonomous import AutonomousPortfolio, enabled as autonomous_enabled
+from .autonomous import AutonomousPortfolio, VERSION as TRADING_VERSION, enabled as autonomous_enabled
 
 log = logging.getLogger("monitor")
 
@@ -262,7 +262,7 @@ class Monitor:
                 archive.set_state("ai_inputs", meta)
                 for name, inputs in portfolio_inputs.items():
                     archive.set_state(f"ai_account_input:{run_id}:{name}", inputs)
-                archive.set_state(f"ai_input:{run_id}", {"policy": "autonomous-six-v1" if portfolio_inputs else "shared-direct-v2",
+                archive.set_state(f"ai_input:{run_id}", {"policy": TRADING_VERSION if portfolio_inputs else "shared-direct-v2",
                     "max_searches": self.settings.ai_max_searches, "context": context})
             finally:
                 archive.conn.close()

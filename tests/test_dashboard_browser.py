@@ -206,6 +206,7 @@ class DashboardBrowserTests(unittest.TestCase):
                         self.assertEqual(panel.get_by_role("heading",name="Codex ·",exact=False).count(),6)
                         self.assertIn("已拒绝",panel.inner_text())
                         self.assertIn("等待条件",panel.inner_text())
+                        self.assertIn("未设置止损",panel.inner_text())
                         panel.get_by_role("combobox",name="账户周期",exact=True).select_option("short")
                         panel.get_by_role("combobox",name="初始仓位",exact=True).select_option("empty")
                         self.assertEqual(panel.get_by_role("heading",name="Codex ·",exact=False).count(),1)
