@@ -18,7 +18,7 @@ class CadenceTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.settings=replace(Settings(),db_path=Path(self.temp.name)/'cadence.db',ai_trading_mode='six_account',
-            ai_max_runs_per_day=12,ai_urgent_reserve=2,ai_short_review_minutes=60,ai_periodic_min_move_pct=.2,
+            ai_max_runs_per_day=120,ai_urgent_reserve=2,ai_short_review_minutes=0,ai_periodic_min_move_pct=.4,
             ai_review_max_idle_minutes=240,ai_schedule_bj=())
         self.store=Store(self.settings.db_path)
         self.a=AIAnalyst(self.settings,self.store,'codex','codex')
@@ -32,25 +32,27 @@ class CadenceTests(unittest.TestCase):
             ((self.now-timedelta(minutes=minutes)).isoformat(),4000,'codex'))
         self.store.conn.commit()
 
-    def test_hourly_check_skips_small_change_then_triggers_once(self):
-        self.view(61)
+    def test_immediate_check_skips_small_change_then_triggers_once(self):
+        self.view(1)
         request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4004},self.now)
         self.assertFalse(read(self.store.conn,'codex')['pending'])
-        request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4012},self.now)
-        request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4012},self.now)
+        request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4020},self.now)
+        request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4020},self.now)
         self.assertEqual(len(read(self.store.conn,'codex')['pending']),1)
+        self.assertIsNotNone(self.a.due())
 
-    def test_no_early_call_and_four_hour_fallback(self):
-        self.view(59)
+    def test_no_minimum_interval_and_four_hour_fallback(self):
+        self.view(1)
         request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4050},self.now)
-        self.assertFalse(read(self.store.conn,'codex')['pending'])
+        self.assertEqual(len(read(self.store.conn,'codex')['pending']),1)
+        self.store.conn.execute("DELETE FROM state WHERE key='ai_events:codex'")
         self.store.conn.execute('DELETE FROM ai_views');self.store.conn.commit()
         self.view(241)
         request_periodic(self.settings,self.store,{'codex':self.a},{'xauusd':4000},self.now)
         self.assertEqual(len(read(self.store.conn,'codex')['pending']),1)
 
     def test_normal_budget_reserves_two_urgent_slots_then_stops_everything(self):
-        for _ in range(10):
+        for _ in range(118):
             self.store.conn.execute("INSERT INTO ai_runs(analyst,started_at,status) VALUES(?,?,'failed')",('codex',self.now.isoformat()))
         self.store.conn.commit()
         self.a.request_refresh('routine',0,event_id='periodic:test')

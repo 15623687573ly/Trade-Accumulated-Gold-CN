@@ -67,10 +67,10 @@ class Settings:
     strategies: tuple = tuple(s.strip() for s in os.environ.get("GOLD_MONITOR_STRATEGIES", "hold,position,position_ai,short,short_ai").split(",") if s.strip())
     ai_trading_mode: str = os.environ.get("GOLD_AI_TRADING_MODE", "six_account")
     ai_hard_stop_loss: float = _env_float("GOLD_AI_HARD_STOP_LOSS", 0.12)
-    ai_short_review_minutes: float = _env_float("GOLD_AI_SHORT_REVIEW_MINUTES", 60)
-    ai_periodic_min_move_pct: float = _env_float("GOLD_AI_PERIODIC_MIN_MOVE_PCT", 0.2)
+    ai_short_review_minutes: float = _env_float("GOLD_AI_SHORT_REVIEW_MINUTES", 0)
+    ai_periodic_min_move_pct: float = _env_float("GOLD_AI_PERIODIC_MIN_MOVE_PCT", 0.4)
     ai_review_max_idle_minutes: float = _env_float("GOLD_AI_REVIEW_MAX_IDLE_MINUTES", 240)
-    ai_max_runs_per_day: int = int(_env_float("GOLD_AI_MAX_RUNS_PER_DAY", 12))
+    ai_max_runs_per_day: int = int(_env_float("GOLD_AI_MAX_RUNS_PER_DAY", 120))
     ai_urgent_reserve: int = int(_env_float("GOLD_AI_URGENT_RESERVE", 2))
     ai_decision_max_age_minutes: float = _env_float("GOLD_AI_DECISION_MAX_AGE_MINUTES", 15)
     account_budget: float = _env_float("GOLD_MONITOR_ACCOUNT_BUDGET", 100_000)   # 每个日线策略账户的虚拟本金
