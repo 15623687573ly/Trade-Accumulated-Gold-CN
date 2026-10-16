@@ -526,8 +526,8 @@ def main() -> int:
     host = os.environ.get("GOLD_WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("GOLD_WEB_PORT", "8080"))
     password = os.environ.get("GOLD_WEB_PASSWORD", "").strip()
-    if host not in ("127.0.0.1", "localhost", "::1") and len(password) < 12:
-        log.error("对外监听 %s 时必须在 .env 设置至少 12 位的 GOLD_WEB_PASSWORD，已拒绝启动", host)
+    if host not in ("127.0.0.1", "localhost", "::1") and len(password) < settings.web_min_password_length:
+        log.error("对外监听 %s 时必须在 .env 设置至少 %d 位的 GOLD_WEB_PASSWORD，已拒绝启动", host, settings.web_min_password_length)
         return 1
     Handler.settings, Handler.password = settings, password
     server = ThreadingHTTPServer((host, port), Handler)
