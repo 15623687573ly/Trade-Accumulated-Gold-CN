@@ -708,7 +708,7 @@ function renderAI(d) {
   const inputHost=el("details",{class:"more card"},el("summary",{},"本轮分析输入详情"));
   const inputs = d.ai_inputs;
   if (inputs) {
-    const labels = { fresh: "可用", stale: "源数据过期", unavailable: "获取失败", unconfigured: "未配置" };
+    const labels = { fresh: "可用", stale: "来源数据过期", cache_stale:"缓存待刷新", unavailable: "获取失败", unconfigured: "未配置", quota_exhausted:"京东额度耗尽",budget_exhausted:"本地预算用完",rate_limited:"请求频率受限",refreshing:"正在获取",no_data:"暂无源数据" };
     const jd = inputs.jd_research || {};
     inputHost.appendChild(card("共同分析数据", el("span", { class: "sub" }, `最近一次准备 ${fmtTs(inputs.at)}`),
       el("p", { class: "market-section-note" }, "两个模型共用基础数据，串行独立判断；允许按预算补搜遗漏信息。此处记录当时输入，最新数据见行情页。"),
@@ -846,9 +846,23 @@ function renderEconomicCalendar(d) {
 }
 function renderJDReference(d) {
   const jd = d.jd_research || {}, funds = jd.funds || {}, orders = jd.orders || {};
-  const statusLabels = { fresh: "参考数据可用", stale: "数据过期", unavailable: "获取失败", not_fetched: "等待分析时获取", unconfigured: "尚未配置" };
-  const status = (item) => el("span", { class: `data-state${item.status === "fresh" ? "" : " warn"}` }, statusLabels[item.status] || "暂无数据");
-  const times = (item) => el("div", { class: "data-meta" }, `发布 ${fmtTs(item.published_at)} · 获取 ${fmtTs(item.fetched_at)}`);
+  const statusLabels = { running:"结果待记录", fresh: "参考数据可用", stale: "来源数据过期", cache_stale:"缓存待刷新", unavailable: "获取失败", not_fetched: "等待分析时获取", unconfigured: "尚未配置",quota_exhausted:"京东额度耗尽",budget_exhausted:"本地预算用完",rate_limited:"请求频率受限",refreshing:"正在获取",no_data:"暂无源数据" };
+  const status = (item) => el("span", { class: `data-state${item.status === "fresh" && !item.refresh_status ? "" : " warn"}` }, `${statusLabels[item.status] || "暂无数据"}${item.status==="fresh" && item.refresh_status && item.refresh_status!=="refreshing" ? " · "+(statusLabels[item.refresh_status] || "刷新暂停") : ""}`);
+  const errorLabels={LocalDailyBudget:"本地每日请求预算已用完",RequestInterrupted:"上次请求未记录结果，等待重试",ProviderDailyQuota:"供应商报告当日额度耗尽",ProviderRateLimit:"供应商限制请求频率",ProviderUnauthorized:"接口授权失败",ProviderRejected:"接口返回失败",TimeoutError:"接口请求超时",URLError:"网络请求失败",ValueError:"返回数据未通过校验",JSONDecodeError:"响应格式错误",InvalidCachedData:"缓存数据格式异常"};
+  const times = (item) => el("div",{},
+    el("div", { class: "data-meta" }, `源发布 ${fmtTs(item.published_at)} · 成功获取 ${fmtTs(item.fetched_at)}`),
+    item.attempted_at ? el("div",{class:"sub"},`最近尝试 ${fmtTs(item.attempted_at)}`) : null,
+    item.error_type ? el("div",{class:"sub"},errorLabels[item.error_type] || "接口请求失败") : null,
+    item.retry_at ? el("div",{class:"sub"},`暂停请求至 ${fmtTs(item.retry_at)}，之后等待正常分析触发重试`) : null);
+  const quota=jd.quota || {};
+  const descriptions={quota_exhausted:"京东返回当日额度耗尽，两个参考接口暂停24小时；此时间是本地重试时间，不代表供应商确认的重置时间。",budget_exhausted:"本地每日请求预算已用完；次日北京时间额度恢复，等待分析触发更新。",rate_limited:"京东限制请求频率，短暂暂停两个参考接口，避免连续重试。"};
+  const budget=el("div",{},
+    quota.daily_cap!=null ? el("div",{class:"sub"},`后台参考请求：今日 ${quota.used_today}/${quota.daily_cap} 次 · 两个模型、两个接口共享预算`) : null,
+    el("div",{class:"sub"},"本地计数不包含历史调试或外部调用，不是京东剩余额度。"),
+    quota.tracked_since ? el("div",{class:"sub"},`请求账本启用 ${fmtTs(quota.tracked_since)}`) : null,
+    descriptions[quota.status] ? el("div",{class:"notice warn",style:"margin-top:8px"},descriptions[quota.status],quota.retry_at ? el("div",{class:"sub"},`可重试时间 ${fmtTs(quota.retry_at)}`) : null) : null);
+  if((quota.recent_requests || []).length) budget.appendChild(el("details",{class:"more","data-detail-key":"jd-request-log"},el("summary",{},"最近接口请求"),
+    el("ul",{class:"list"},quota.recent_requests.map((r)=>el("li",{},`${fmtTs(r.started_at)} · ${r.kind==="funds" ? "资金" : "挂单"} · ${statusLabels[r.status] || r.status}`,r.error_type ? el("div",{class:"sub"},errorLabels[r.error_type] || "接口请求失败") : null)))));
   const fundCard = card("大额成交 · 多空占比", status(funds));
   if (funds.status === "fresh") {
     const total = funds.long_pct + funds.short_pct;
@@ -870,7 +884,7 @@ function renderJDReference(d) {
   orderCard.appendChild(times(orders));
   return card("京东黄金参考", el("span", { class: "sub" }, "分析时获取 · 缓存15分钟"),
     el("p", { class: "market-section-note" }, "资金数据为最近一次事件；挂单价格沿用来源口径，单位未明确，不作为积存金成交价格。"),
-    el("div", { class: "grid-2" }, fundCard, orderCard),
+    budget,el("div", { class: "grid-2" }, fundCard, orderCard),
     el("div", { class: "data-meta" }, el("a", { href: "https://youqian.jd.com/", target: "_blank", rel: "noopener noreferrer" }, "数据由京东金融有钳提供")));
 }
 function renderMarketNews(d) {

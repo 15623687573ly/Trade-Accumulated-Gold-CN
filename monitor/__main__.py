@@ -143,7 +143,7 @@ class Monitor:
                 "hard_events_24h": (macro.get("hard_events_24h") or [])[:8] if valid["calendar"] else [],
                 "status": {kind: "available" if valid[kind] else "stale_or_missing" for kind in valid},
                 "errors": macro.get("errors")}
-            ctx["jd_research"] = jd_snapshot(store, self.settings.clawx_api_key)
+            ctx["jd_research"] = jd_snapshot(store, self.settings.clawx_api_key, daily_cap=self.settings.jd_research_max_requests_per_day)
         finally:
             store.conn.close()
         ctx["jin10_flash_recent"] = jin10_recent or []

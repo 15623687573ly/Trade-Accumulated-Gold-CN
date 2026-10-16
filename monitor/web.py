@@ -245,22 +245,15 @@ def ai_section(conn: sqlite3.Connection, settings: Settings) -> Dict[str, Any]:
             "strategy_source": "independent", "history": [brief(r) for r in history]}
 
 
-def jd_reference(conn):
-    """只读已采集缓存，不在页面刷新时调用京东接口，也不返回原始响应。"""
-    from .jd_research import summarize
-    out = {}
-    now = datetime.now(timezone.utc)
-    for kind in ("funds", "orders"):
-        cached = get_state(conn, "jd_research:" + kind) or {}
-        try:
-            summary = summarize(kind, cached["raw"], now) if cached.get("raw") else cached.get("summary", {"status": "not_fetched"})
-            age = (now - datetime.fromisoformat(cached["fetched_at"])).total_seconds()
-            if not 0 <= age <= 3600:
-                summary = {"status": "stale", "published_at": summary.get("published_at")}
-        except (KeyError, TypeError, ValueError, OverflowError):
-            summary = {"status": "unavailable" if cached else "not_fetched"}
-        out[kind] = {**summary, "fetched_at": cached.get("fetched_at")}
-    return out
+def jd_reference(conn, settings=None):
+    """Read only; same freshness and quota states as model input, with no network calls."""
+    from .jd_research import public_entry, quota_view
+    now=datetime.now(timezone.utc)
+    cap=(settings or Settings()).jd_research_max_requests_per_day
+    quota=quota_view(conn,cap,now)
+    if table_exists(conn,"jd_research_requests"):
+        quota["recent_requests"]=[dict(r) for r in conn.execute("SELECT kind,endpoint,started_at,status,error_type FROM jd_research_requests ORDER BY id DESC LIMIT 10")]
+    return {"quota":quota,**{kind:public_entry(conn,kind,now,quota) for kind in ("funds","orders")}}
 
 
 def dashboard(settings: Settings) -> Dict[str, Any]:
@@ -322,7 +315,7 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
             "scorecard": evaluate_scorecard(conn),
             "macro": get_state(conn, "web_macro"),
             "ai_inputs": get_state(conn, "ai_inputs"),
-            "jd_research": jd_reference(conn),
+            "jd_research": jd_reference(conn,settings),
             "jin10": (get_state(conn, "jin10_flash") or [])[:30],
             "jin10_triage": get_state(conn, "jin10_triage") or {},
             "fills": [{k: r[k] for k in ("strategy", "ts", "side", "grams", "price", "fee", "reason")} | {"decision": json.loads(r["decision_json"]) if "decision_json" in r.keys() and r["decision_json"] else None} for r in fills],
