@@ -34,6 +34,7 @@ from .store import Store, utc_now
 from .strategy import build_plan
 from .controls import active, control, identity, short_labels
 from .execution import execution_quote
+from .autonomous import AutonomousPortfolio, enabled as autonomous_enabled
 
 log = logging.getLogger("monitor")
 
@@ -55,7 +56,13 @@ class Monitor:
         # Retire the previous shared AI book without abandoning its open position.
         self.legacy_short = (PaperBook(settings, self.store, "short_ai", "旧实验 · 短线 AI")
                              if self.store.open_trade(settings.paper_bank, "short_ai") else None)
-        self.accounts = Accounts(settings, self.store, [k for k in settings.strategies if k not in ("short", "short_ai")])
+        daily = [k for k in settings.strategies if k not in ("short", "short_ai")]
+        if autonomous_enabled(settings):
+            daily = [k for k in daily if k in ("hold", "position")]
+        self.accounts = Accounts(settings, self.store, daily)
+        self.portfolios = AutonomousPortfolio(settings,self.store) if autonomous_enabled(settings) else None
+        self.retired_short_books = {f"{m}:short_ai": PaperBook(settings,self.store,f"{m}:short_ai",f"旧实验 · {m.title()}")
+            for m in settings.ai_analysts if self.portfolios and self.store.open_trade(settings.paper_bank,f"{m}:short_ai")}
         self.notifier = Notifier(settings, dry_run=dry_run)
         self._ai_thread: threading.Thread = None
         self._jin10_at = None
@@ -168,6 +175,9 @@ class Monitor:
             return events
         due = {name: ("手动" if force else a.due()) for name, a in self.enabled_analysts().items()}
         due = {name: trigger for name, trigger in due.items() if trigger}
+        if self.portfolios:
+            due = {name:trigger for name,trigger in due.items() if self.store.conn.execute(
+                "SELECT COUNT(*) FROM ai_portfolios WHERE model=? AND started_at IS NOT NULL",(name,)).fetchone()[0] == 6}
         if not due:
             return events
         if len(due) > 1:
@@ -222,19 +232,37 @@ class Monitor:
             coverage_store = Store(self.settings.db_path)
             try:
                 pending = {name: read_events(coverage_store.conn, name)["pending"] for name in due}
+                portfolio_inputs = {name: self.portfolios.input(name, snap.get("execution_quote"),coverage_store)
+                                    for name in due} if self.portfolios else {}
+                trend = None
+                if self.portfolios:
+                    from .accounts import last_completed_ny_day
+                    bars = coverage_store.conn.execute("SELECT day,xau_close FROM daily_bars WHERE day<=? ORDER BY day DESC LIMIT 61",
+                        (last_completed_ny_day(utc_now()).isoformat(),)).fetchall()
+                    if bars:
+                        trend = {"source": "GC=F期货日线代理，非京东历史成交价", "last_day": bars[0]["day"],
+                            "last_close_usd": bars[0]["xau_close"],
+                            "changes_pct": {f"{n}d": round((bars[0]["xau_close"]/bars[n]["xau_close"]-1)*100,2)
+                                            for n in (5,20,60) if len(bars)>n and bars[n]["xau_close"]>0}}
             finally:
                 coverage_store.conn.close()
             context = dict(self.ai_context(snap, base_plan, jin10_recent))
+            if trend:
+                context["daily_trend_reference"] = trend
             context["event_coverage"] = {name: [e["id"] for e in events] for name, events in pending.items()}
             shared = {e["id"]: e for events in pending.values() for e in events}
             context["trigger_events"] = [{k: e[k] for k in ("id", "reason", "observed_at", "data")} for e in shared.values()]
             archive = Store(self.settings.db_path)
             try:
                 meta = archive.get_state("ai_inputs", {})
-                meta.update({"context_chars": len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))),
+                sizes = {name:len(json.dumps({**context,"trading_accounts":inputs},ensure_ascii=False,separators=(",",":")))
+                         for name,inputs in portfolio_inputs.items()}
+                meta.update({"model_context_chars":sizes,"context_chars":max(sizes.values()) if sizes else len(json.dumps(context, ensure_ascii=False, separators=(",", ":"))),
                              "trigger_events": len(shared), "event_coverage": context["event_coverage"]})
                 archive.set_state("ai_inputs", meta)
-                archive.set_state(f"ai_input:{run_id}", {"policy": "shared-direct-v2",
+                for name, inputs in portfolio_inputs.items():
+                    archive.set_state(f"ai_account_input:{run_id}:{name}", inputs)
+                archive.set_state(f"ai_input:{run_id}", {"policy": "autonomous-six-v1" if portfolio_inputs else "shared-direct-v2",
                     "max_searches": self.settings.ai_max_searches, "context": context})
             finally:
                 archive.conn.close()
@@ -250,7 +278,10 @@ class Monitor:
                 if not active(store.conn, name):
                     return name, None
                 store.set_state(f"ai_runtime:{name}", {"running": True, "queued": False, "started_at": utc_now().isoformat()})
-                return name, self.analysts[name].analyze(deepcopy(context), due[name], store=store, run_id=run_id)
+                model_context = deepcopy(context)
+                if name in portfolio_inputs:
+                    model_context["trading_accounts"] = deepcopy(portfolio_inputs[name])
+                return name, self.analysts[name].analyze(model_context, due[name], store=store, run_id=run_id)
             except Exception:
                 log.exception("%s 分析线程异常", name)
                 return name, None
@@ -409,12 +440,17 @@ class Monitor:
             return snap, None, events
 
         self.refresh_macro_if_due()
+        if self.portfolios:
+            events += self.portfolios.on_tick(snap)
         self.request_ai_after_data_release()
+        if self.portfolios:
+            from .cadence import request_periodic
+            request_periodic(self.settings,self.store,self.enabled_analysts(),snap,utc_now())
         events += self.run_ai_if_due(snap, force=force_ai)
         cost = {"spread_cny": self.settings.spread_cny, "sell_fee_rate": self.settings.sell_fee_rate,
                 "ratio_bank": self.settings.paper_bank}
         base_plan = build_plan(snap, axis_m=DEFAULT_AXIS_M, **cost)
-        views = {name: a.latest(self.settings.ai_view_max_age_hours) for name, a in self.analysts.items()}
+        views = {name: a.latest(self.settings.ai_view_max_age_hours) for name, a in self.analysts.items()} if not self.portfolios else {}
         ai_plans = {name: self.build_ai_led_plan(snap, view, cost) for name, view in views.items() if view}
         plan = base_plan  # Shared alerts show the rule baseline; model plans are displayed separately.
         if self.short_enabled:
@@ -429,7 +465,9 @@ class Monitor:
                 model, _ = identity(key)
                 if model:
                     events += book.on_tick(snap, ai_plans.get(model) or {"ok": False})
-        daily_views = {name: a.latest(DAILY_VIEW_MAX_AGE_HOURS) for name, a in self.analysts.items()}
+        daily_views = {name: a.latest(DAILY_VIEW_MAX_AGE_HOURS) for name, a in self.analysts.items()} if not self.portfolios else {}
+        for book in self.retired_short_books.values():
+            events += book.on_tick(snap, {"ok": False})
         if self.legacy_short:
             events += self.legacy_short.on_tick(snap, {"ok": False})
         events += self.accounts.run_daily(snap, daily_views)

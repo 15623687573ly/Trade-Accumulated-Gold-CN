@@ -26,7 +26,7 @@ def result():
 class EventTimingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.settings = replace(Settings(), db_path=Path(self.tmp.name)/"test.db", ai_schedule_bj=(),
+        self.settings = replace(Settings(), ai_trading_mode="probability", db_path=Path(self.tmp.name)/"test.db", ai_schedule_bj=(),
             ai_analysts=("claude", "codex"), ai_backend="api", anthropic_api_key="",
             claude_cli="missing-claude", codex_cli="missing-codex", clawx_api_key="")
         self.store = Store(self.settings.db_path)

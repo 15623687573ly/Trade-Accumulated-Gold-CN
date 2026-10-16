@@ -54,7 +54,7 @@ def plan(v=None):
 class TradingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.settings = replace(Settings(), db_path=Path(self.tmp.name) / "test.db",
+        self.settings = replace(Settings(), ai_trading_mode="probability", db_path=Path(self.tmp.name) / "test.db",
                                 ai_analysts=("claude", "codex"), account_budget=100000,
                                 paper_grams=10, sell_fee_rate=.004, spread_cny=0,
                                 ai_backend="api", anthropic_api_key="",

@@ -27,15 +27,17 @@ from .config import BANK_NAMES, Settings
 from .scorecard import evaluate as evaluate_scorecard
 from .strategies import REGISTRY
 from .controls import control, set_enabled, identity, short_labels, daily_keys
-from .performance import comparison
+from .performance import comparison, autonomous_comparison
+from .autonomous import summaries as portfolio_summaries, enabled as autonomous_enabled, keys as portfolio_keys, exists as portfolios_exist
 from urllib.parse import urlsplit
 from .execution import EXECUTION_NAME, execution_quote
 from .ai_events import read as read_events
+from .cadence import usage as ai_run_usage
 
 log = logging.getLogger("monitor.web")
 
 STATIC = Path(__file__).resolve().parent / "static"
-SERIES_ORDER = ["hold", "position", "short", "claude:position_ai", "codex:position_ai", "claude:short_ai", "codex:short_ai"]
+SERIES_ORDER = ["hold", "position", "short", "claude:position_ai", "codex:position_ai", "claude:short_ai", "codex:short_ai"] + [f"{m}:{p}_{s}" for m in ("claude","codex") for p in ("short","medium","long") for s in ("full","empty")]
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -102,6 +104,13 @@ def equity_curves(conn: sqlite3.Connection, settings: Settings) -> Dict[str, Any
                     "SELECT ts,value FROM paper_equity WHERE strategy=? AND rowid IN "
                     "(SELECT MAX(rowid) FROM paper_equity WHERE strategy=? GROUP BY substr(ts,1,13)) ORDER BY ts", (key, key))]
                 series.append({"key": key, "name": label, "points": points})
+    if autonomous_enabled(settings) and portfolios_exist(conn):
+        for key,label in portfolio_keys(settings).items():
+            account = conn.execute("SELECT budget,started_at FROM ai_portfolios WHERE key=?",(key,)).fetchone()
+            if account and account["started_at"]:
+                points = [[r["ts"],round(r["value"]/account["budget"]-1,6)] for r in conn.execute(
+                    "SELECT ts,value FROM ai_portfolio_equity WHERE account=? AND rowid IN (SELECT MAX(rowid) FROM ai_portfolio_equity WHERE account=? GROUP BY substr(ts,1,13)) ORDER BY ts",(key,key))]
+                series.append({"key":key,"name":label,"points":points})
     series.sort(key=lambda s: SERIES_ORDER.index(s["key"]) if s["key"] in SERIES_ORDER else 99)
     return {"series": series, "start": start}
 
@@ -266,9 +275,21 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
             keys).fetchall() if keys and table_exists(conn, "account_fills") else []
         alerts = conn.execute("SELECT ts, title, delivered FROM alerts ORDER BY ts DESC LIMIT 20").fetchall()
         board = leaderboard(conn, settings, price)
+        if autonomous_enabled(settings):
+            board += portfolio_summaries(conn,settings,price)
         curves = equity_curves(conn, settings)
         shorts = [short_paper(conn, settings.paper_bank, key, price, settings.sell_fee_rate,
                               settings.spread_cny, label) for key, label in short_labels(settings).items()]
+        if autonomous_enabled(settings) and portfolios_exist(conn):
+            for r in conn.execute("SELECT f.*,v.view_json,v.run_id FROM ai_portfolio_fills f LEFT JOIN ai_views v ON v.rowid=f.view_id ORDER BY f.id DESC LIMIT 200"):
+                view = json.loads(r["view_json"]) if r["view_json"] else {}
+                action = (view.get("account_decisions") or {}).get(r["account"].split(":",1)[1])
+                brief = {k:view[k] for k in ("p_up_3d","p_down_3d","p_up_3m","p_down_3m") if k in view}
+                brief.update({"summary":r["reason"],"_analyst":identity(r["account"])[0],"_view_id":r["view_id"],"_run_id":r["run_id"]})
+                fills.append({"strategy":r["account"],**{k:r[k] for k in ("ts","side","grams","price","fee","reason")},
+                    "decision_json":json.dumps({"analyst":identity(r["account"])[0],"version":"autonomous-six-v1","view":brief,
+                        "order":action,"execution_quote":json.loads(r["quote_json"])})})
+            fills.sort(key=lambda f:f["ts"],reverse=True)
         controls = []
         for name in settings.ai_analysts:
             if name not in ("claude", "codex"):
@@ -276,7 +297,8 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
             status = get_state(conn, f"ai_status:{name}") or {}
             controls.append({"key": name, "name": name.title(), **control(conn, name), **status,
                              "runtime": get_state(conn, f"ai_runtime:{name}") or {},
-                             "pending_events": len(read_events(conn, name)["pending"])})
+                             "runs_today": ai_run_usage(conn,name,datetime.now(timezone.utc)), "daily_cap": settings.ai_max_runs_per_day,
+                             "urgent_reserve": settings.ai_urgent_reserve, "pending_events": len(read_events(conn, name)["pending"])})
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "bank": settings.paper_bank, "bank_name": EXECUTION_NAME,
@@ -284,7 +306,16 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
                           "ready": quote is not None, "since": get_state(conn, "jd_execution_since")},
             "sell_fee_rate": settings.sell_fee_rate, "snapshot": snap,
             "leaderboard": board, "equity": curves, "short": shorts,
-            "model_controls": controls, "comparison": comparison(conn, board, shorts, curves),
+            "trading_mode": settings.ai_trading_mode,
+            "cadence": {"review_minutes":settings.ai_short_review_minutes,"min_move_pct":settings.ai_periodic_min_move_pct,
+                        "max_idle_minutes":settings.ai_review_max_idle_minutes},
+            "model_controls": controls, "comparison": (autonomous_comparison(conn,settings,board,shorts,curves,price)
+                if autonomous_enabled(settings) else comparison(conn, board, shorts, curves)),
+            "autonomous": {"accounts": portfolio_summaries(conn,settings,price),
+                "plans": [dict(r) | {"decision":json.loads(r["decision_json"])} for r in conn.execute("SELECT * FROM ai_plans ORDER BY id DESC LIMIT 100")]
+                    if portfolios_exist(conn) else [],
+                "fills": [dict(r) for r in conn.execute("SELECT * FROM ai_portfolio_fills ORDER BY id DESC LIMIT 200")]
+                    if portfolios_exist(conn) else []},
             "prices": price_history(conn),
             "ai": ai_section(conn, settings),
             "scorecard": evaluate_scorecard(conn),
@@ -295,7 +326,7 @@ def dashboard(settings: Settings) -> Dict[str, Any]:
             "jin10_triage": get_state(conn, "jin10_triage") or {},
             "fills": [{k: r[k] for k in ("strategy", "ts", "side", "grams", "price", "fee", "reason")} | {"decision": json.loads(r["decision_json"]) if "decision_json" in r.keys() and r["decision_json"] else None} for r in fills],
             "alerts": [{"ts": r["ts"], "title": r["title"], "delivered": bool(r["delivered"])} for r in alerts],
-            "strategy_names": {k: cls.name for k, cls in REGISTRY.items()},
+            "strategy_names": {**{k: cls.name for k, cls in REGISTRY.items()},**portfolio_keys(settings)},
             "series_order": SERIES_ORDER,
         }
     finally:

@@ -22,7 +22,7 @@ class DashboardBrowserTests(unittest.TestCase):
     def test_render_compare_switch_and_reload(self):
         from playwright.sync_api import sync_playwright
         with tempfile.TemporaryDirectory() as tmp:
-            settings = replace(Settings(), db_path=Path(tmp) / "test.db", ai_analysts=("claude", "codex"),
+            settings = replace(Settings(), ai_trading_mode="probability", db_path=Path(tmp) / "test.db", ai_analysts=("claude", "codex"),
                                ai_backend="api", anthropic_api_key="", codex_cli="missing-codex", claude_cli="missing-claude")
             monitor = Monitor(settings, True)
             market = {"ts": utc_now(), "market_open": True, "xauusd": 4000, "change_pct": .3,
@@ -162,6 +162,67 @@ class DashboardBrowserTests(unittest.TestCase):
                 server.server_close()
                 thread.join(3)
                 monitor.store.conn.close()
+
+    def test_six_account_actions_filters_and_comparison_mobile(self):
+        from playwright.sync_api import sync_playwright
+        from test_autonomous import response, snapshot
+        with tempfile.TemporaryDirectory() as tmp:
+            settings=replace(Settings(),ai_trading_mode="six_account",db_path=Path(tmp)/"six.db",anthropic_api_key="",
+                             claude_cli="missing-claude",codex_cli="missing-codex",clawx_api_key="")
+            monitor=Monitor(settings,True)
+            for name in settings.ai_analysts: monitor.store.set_state("ai_status:"+name,{"available":True})
+            snap=snapshot()
+            monitor.portfolios.on_tick(snap)
+            analyst=AIAnalyst(settings,monitor.store,"codex",analyst="codex")
+            value=response(short_empty=dict(action="buy",amount_cny=100001,stop_loss_cny=950),
+                medium_empty=dict(action="buy",execution="limit",amount_cny=10000,limit_price_cny=990,stop_loss_cny=950),
+                short_full=dict(action="sell",grams=10))
+            analyst._run_codex=Mock(return_value=("notes",[],value))
+            analyst.analyze({"snapshot_at":utc_now().isoformat(),"xauusd":4000,
+                "trading_accounts":monitor.portfolios.input("codex",snap["execution_quote"])},"test")
+            monitor.portfolios.on_tick(snap)
+            monitor.publish_for_web(snap,None)
+            class SixHandler(Handler):
+                password=""
+                def log_message(self,*args): pass
+            SixHandler.settings=settings
+            server=ThreadingHTTPServer(("127.0.0.1",0),SixHandler)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            try:
+                with sync_playwright() as pw:
+                    browser=pw.chromium.launch(headless=True,args=["--no-sandbox"])
+                    try:
+                        page=browser.new_page(viewport={"width":1280,"height":900})
+                        errors=[];page.on("pageerror",lambda error:errors.append(str(error)))
+                        page.goto(f"http://127.0.0.1:{server.server_port}/#ai")
+                        page.get_by_role("heading",name="六账户自主操盘",exact=True).wait_for()
+                        panel=page.locator("#panel-ai")
+                        panel.get_by_role("combobox",name="账户模型",exact=True).select_option("codex")
+                        self.assertEqual(panel.get_by_role("heading",name="Codex ·",exact=False).count(),6)
+                        self.assertIn("已拒绝",panel.inner_text())
+                        self.assertIn("等待条件",panel.inner_text())
+                        panel.get_by_role("combobox",name="账户周期",exact=True).select_option("short")
+                        panel.get_by_role("combobox",name="初始仓位",exact=True).select_option("empty")
+                        self.assertEqual(panel.get_by_role("heading",name="Codex ·",exact=False).count(),1)
+                        self.assertIn("现金 100,000",panel.inner_text())
+                        page.evaluate("window.scrollTo(0,0)")
+                        page.screenshot(path="/tmp/gold-six-desktop.png",full_page=True)
+                        page.get_by_role("tab",name="操盘对比",exact=True).click()
+                        self.assertEqual(page.locator("#panel-compare tbody tr").count(),12)
+                        self.assertIn("600,000",page.locator("#panel-compare").inner_text())
+                        page.set_viewport_size({"width":390,"height":844})
+                        self.assertTrue(page.locator("#panel-compare .compare-mobile").is_visible())
+                        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"))
+                        page.screenshot(path="/tmp/gold-six-comparison-mobile.png",full_page=True)
+                        page.get_by_role("tab",name="AI",exact=True).click()
+                        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"))
+                        page.screenshot(path="/tmp/gold-six-mobile.png",full_page=True)
+                        page.get_by_role("tab",name="记录",exact=True).click()
+                        self.assertIn("实验初始化",page.locator("#panel-records").inner_text())
+                        self.assertEqual(errors,[])
+                    finally: browser.close()
+            finally:
+                server.shutdown();server.server_close();thread.join(3);monitor.store.conn.close()
 
 
 if __name__ == "__main__":
